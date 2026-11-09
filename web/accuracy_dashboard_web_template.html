@@ -1,0 +1,202 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JEPX 予測精度</title><style>
+:root{--bg:#f4f7fb;--card:#fff;--text:#18243a;--muted:#66758a;--blue:#2468d4;--line:#dfe6ef}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Yu Gothic UI",sans-serif}header{padding:20px 28px;background:#10213a;color:#fff;display:flex;justify-content:space-between;gap:16px;align-items:center}h1{margin:2px 0;font-size:24px}.sub{font-size:13px;color:#cbd7e8}.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}button,select,input{padding:8px 11px;border-radius:8px;border:1px solid #c7d2e2;background:#fff;font-weight:700}button.on{background:var(--blue);color:#fff}main{max-width:1500px;margin:auto;padding:20px}.status{color:var(--muted);margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}.card{background:#fff;padding:14px;border-radius:12px;box-shadow:0 2px 10px #1f355b12}.kpi span{display:block;font-size:12px;color:var(--muted)}.kpi strong{font-size:21px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}.wide{grid-column:1/-1}canvas{width:100%;height:380px}.card h2:after{content:"  （円/kWh）";font-size:11px;color:#66758a;font-weight:400}.tablewrap{overflow:auto;max-height:480px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:right}th{position:sticky;top:0;background:#edf2f8}th:nth-child(-n+5),td:nth-child(-n+5){text-align:left}@media(max-width:1000px){header{flex-direction:column;align-items:flex-start}.kpis{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}</style></head><body>
+<header><div><div class="sub">JEPX FORECAST ACCURACY</div><h1>予測・実績 比較ダッシュボード</h1><div class="sub">対象日ごとに最新の計算日を採用／実績のみでも表示</div></div><div class="controls"><label>最終日 <input id="endDate" type="date"></label><button data-days="1">1日</button><button data-days="7" class="on">7日</button><button data-days="30">1か月</button><select id="area"></select><select id="day"><option value="all">全DAY</option></select><button onclick="location.reload()">最新データに更新</button></div></header>
+<main><div id="status" class="status"></div><div id="runs" class="card"></div><div id="kpis" class="kpis" style="margin-top:12px"></div><section class="grid"><article class="card wide"><h2>予測・実績</h2><canvas id="mainChart"></canvas></article><article class="card"><h2>日別 MAE</h2><canvas id="maeChart"></canvas></article><article class="card"><h2>日別 Bias</h2><canvas id="biasChart"></canvas></article><article class="card wide"><h2>比較詳細</h2><div class="tablewrap"><table><thead><tr><th>対象日時</th><th>エリア</th><th>DAY</th><th>採用計算日</th><th>予測計算日時</th><th>予測</th><th>実績</th><th>誤差</th><th>絶対誤差</th></tr></thead><tbody id="body"></tbody></table></div></article></section></main><script>const P=__PAYLOAD__,D=P.records,$=s=>document.querySelector(s);let days=7;const areas=[...new Map(D.map(x=>[x.area,x.area_ja||x.area])).entries()];area.innerHTML=areas.map(x=>`<option value="${x[0]}">${x[1]}</option>`).join('');if(areas.some(x=>x[0]=='system'))area.value='system';day.innerHTML+=[1,2,3,4,5,6,7].map(x=>`<option>${x}</option>`).join('');const dates=[...new Set(D.map(x=>x.target_date))].sort();endDate.min=dates[0]||'';endDate.max=P.marketConfirmedThrough;endDate.value=P.marketConfirmedThrough;
+function ok(x){return typeof x==='number'&&isFinite(x)}function f(x,d=2){return ok(x)?x.toLocaleString('ja-JP',{maximumFractionDigits:d}):'-'}function rows(){let e=new Date(endDate.value+'T00:00:00'),s=new Date(e);s.setDate(s.getDate()-days+1);return D.filter(x=>x.area==area.value&&(day.value=='all'||x.day==+day.value)&&new Date(String(x.target_date).slice(0,10)+'T00:00:00')>=s&&new Date(String(x.target_date).slice(0,10)+'T00:00:00')<=e).sort((a,b)=>(a.target_datetime||a.target_date).localeCompare(b.target_datetime||b.target_date)||((a.slot||0)-(b.slot||0)))}function met(a){let z=a.filter(x=>ok(x.predicted_price_yen_kwh)&&ok(x.actual_price_yen_kwh)),e=z.map(x=>x.predicted_price_yen_kwh-x.actual_price_yen_kwh);if(!e.length)return{};return{n:e.length,mae:e.reduce((s,v)=>s+Math.abs(v),0)/e.length,rmse:Math.sqrt(e.reduce((s,v)=>s+v*v,0)/e.length),bias:e.reduce((s,v)=>s+v,0)/e.length,mape:z.reduce((s,x)=>s+(x.actual_price_yen_kwh?Math.abs((x.predicted_price_yen_kwh-x.actual_price_yen_kwh)/x.actual_price_yen_kwh):0),0)/e.length*100}}
+/*bar-chart*/function drawBar(id,v,lab,col){let cv=$('#'+id),w=cv.clientWidth||800,h=cv.clientHeight||340,z=devicePixelRatio||1;cv.width=w*z;cv.height=h*z;let c=cv.getContext('2d');c.scale(z,z);c.clearRect(0,0,w,h);let vs=v.filter(ok);if(!vs.length){c.fillStyle='#66758a';c.fillText('表示対象データなし',20,30);return}let mn=Math.min(0,...vs),mx=Math.max(0,...vs),pad=(mx-mn||1)*.12,p={l:64,r:18,t:22,b:50};if(mn<0)mn-=pad;if(mx>0)mx+=pad;let Y=q=>p.t+(mx-q)*(h-p.t-p.b)/(mx-mn),n=v.length,bw=(w-p.l-p.r)/n,step=bw>=34?1:Math.ceil(34/bw);c.font='11px Segoe UI';c.lineWidth=1;for(let j=0;j<=5;j++){let y=p.t+j*(h-p.t-p.b)/5,q=mx-j*(mx-mn)/5;c.strokeStyle='#dfe6ef';c.beginPath();c.moveTo(p.l,y);c.lineTo(w-p.r,y);c.stroke();c.fillStyle='#64748b';c.fillText(q.toFixed(2),6,y+4)}let y0=Y(0);c.strokeStyle='#94a3b8';c.beginPath();c.moveTo(p.l,y0);c.lineTo(w-p.r,y0);c.stroke();c.textAlign='center';v.forEach((q,i)=>{let cx=p.l+bw*(i+.5),bwi=Math.max(2,bw*.7);if(ok(q)){let y=Y(q);c.fillStyle=col;c.fillRect(cx-bwi/2,Math.min(y,y0),bwi,Math.max(1,Math.abs(y0-y)));c.fillStyle='#111827';c.font=(bw<30?'9px':'11px')+' Segoe UI';c.fillText(q.toFixed(2),cx,q>=0?y-4:y+12)}c.font='11px Segoe UI';c.fillStyle='#64748b';if(i%step==0)c.fillText(String(lab[i]).slice(5),cx,h-p.b+16)});c.textAlign='left'}function draw(id,series){let cv=$('#'+id),w=cv.clientWidth||800,h=cv.clientHeight||340,z=devicePixelRatio||1;cv.width=w*z;cv.height=h*z;let c=cv.getContext('2d');c.scale(z,z);let vs=series.flatMap(s=>s.v).filter(ok);c.clearRect(0,0,w,h);if(!vs.length){c.fillStyle='#66758a';c.fillText('表示対象データなし',20,30);return}let mn=Math.min(...vs),mx=Math.max(...vs),pad=(mx-mn||1)*.08,p={l:64,r:18,t:22,b:50};mn-=pad;mx+=pad;let X=i=>p.l+i*(w-p.l-p.r)/Math.max(1,series[0].v.length-1),Y=v=>p.t+(mx-v)*(h-p.t-p.b)/(mx-mn);c.font='11px Segoe UI';c.fillStyle='#64748b';c.strokeStyle='#dfe6ef';c.lineWidth=1;for(let j=0;j<=5;j++){let y=p.t+j*(h-p.t-p.b)/5,v=mx-j*(mx-mn)/5;c.beginPath();c.moveTo(p.l,y);c.lineTo(w-p.r,y);c.stroke();c.fillText(v.toFixed(2),6,y+4)}let n=series[0].v.length,step=Math.max(1,Math.ceil(n/8));/*hour-grid*/if(window.__chartRows&&window.__chartRows.length===n){let R=window.__chartRows;c.save();c.strokeStyle=`#cbd5e1`;c.lineWidth=1;c.setLineDash([2,4]);R.forEach((x,i)=>{let t=String(x.target_datetime||``);if(/(\s|T)12:00/.test(t)){let xx=X(i);c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke()}});c.setLineDash([]);c.restore()}if(mn<0&&mx>0){c.strokeStyle='#94a3b8';c.setLineDash([5,4]);c.beginPath();c.moveTo(p.l,Y(0));c.lineTo(w-p.r,Y(0));c.stroke();c.setLineDash([])}/*midnight-lines*/if(window.__chartRows&&window.__chartRows.length===series[0].v.length){let R=window.__chartRows;c.save();c.strokeStyle=`#475569`;c.fillStyle=`#334155`;c.lineWidth=1.2;c.setLineDash([]);c.font=`11px Segoe UI`;R.forEach((x,i)=>{let t=String(x.target_datetime||``);let mid=/[ T]00:00/.test(t)||(!x.target_datetime&&x.slot==1);if(mid){let xx=X(i);c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();c.fillText(String(x.target_date||t.slice(0,10)).slice(5),xx+3,p.t+11)}});c.restore()}series.forEach(s=>{c.strokeStyle=s.c;c.lineWidth=s.name==='実績'?3:2;c.beginPath();let pen=false;s.v.forEach((v,i)=>{if(ok(v)){let x=X(i),y=Y(v);pen?c.lineTo(x,y):c.moveTo(x,y);pen=true}else pen=false});c.stroke()})}
+function shadeRuns(id,r){
+ let cv=$('#'+id),c=cv.getContext('2d'),w=cv.clientWidth||800,h=cv.clientHeight||340;
+ if(!r.length)return;
+
+ let p={l:64,r:18,t:22,b:50},n=r.length;
+ let X=i=>p.l+i*(w-p.l-p.r)/Math.max(1,n-1);
+
+ let colors=[
+  '#2563eb',
+  '#059669',
+  '#dc2626',
+  '#7c3aed',
+  '#ea580c',
+  '#0891b2',
+  '#c026d3',
+  '#65a30d'
+ ];
+
+ let groups=[];
+ let start=0;
+ let current=(r[0].selected_run||r[0].selected_calc_date)||'';
+
+ for(let i=1;i<=n;i++){
+  let next=i<n?((r[i].selected_run||r[i].selected_calc_date)||''):null;
+
+  if(i===n || next!==current){
+   groups.push({
+    start:start,
+    end:i-1,
+    calc:current
+   });
+
+   start=i;
+   current=next;
+  }
+ }
+
+ c.save();
+
+ groups.forEach((g,k)=>{
+  if(!g.calc)return;
+
+  let color=colors[k%colors.length];
+
+  let x1=X(g.start);
+  let x2=X(g.end);
+
+  if(g.start>0){
+   x1=(X(g.start-1)+X(g.start))/2;
+  }
+
+  if(g.end<n-1){
+   x2=(X(g.end)+X(g.end+1))/2;
+  }
+
+  c.fillStyle=color+'16';
+
+  c.fillRect(
+   x1,
+   p.t,
+   Math.max(1,x2-x1),
+   h-p.t-p.b
+  );
+
+  c.strokeStyle=color;
+  c.lineWidth=1.5;
+  c.setLineDash([5,5]);
+
+  c.beginPath();
+  c.moveTo(x1,p.t);
+  c.lineTo(x1,h-p.b);
+  c.stroke();
+
+  c.setLineDash([]);
+
+  let label=(r[g.start].selected_run?g.calc.slice(5):g.calc.slice(5))+'計算';
+  c.font='bold 12px Segoe UI';
+  c.fillStyle=color;
+
+  let tw=c.measureText(label).width;
+
+  let tx=Math.min(
+   Math.max(x1+5,p.l),
+   w-p.r-tw
+  );
+
+  c.fillText(
+   label,
+   tx,
+   16
+  );
+ });
+
+ c.restore();
+}
+function shadeRuns(id,r){
+ let cv=$('#'+id),c=cv.getContext('2d');
+ let w=cv.width/(window.devicePixelRatio||1);
+ let h=cv.height/(window.devicePixelRatio||1);
+
+ if(!r.length)return;
+
+ let p={l:64,r:18,t:22,b:50};
+ let n=r.length;
+
+ let X=i=>p.l+i*(w-p.l-p.r)/Math.max(1,n-1);
+
+ let colors=[
+  '#2563eb',
+  '#059669',
+  '#dc2626',
+  '#7c3aed',
+  '#ea580c',
+  '#0891b2',
+  '#c026d3',
+  '#65a30d'
+ ];
+
+ let groups=[];
+ let start=0;
+ let current=(r[0].selected_run||r[0].selected_calc_date)||'';
+
+ for(let i=1;i<=n;i++){
+  let next=i<n?((r[i].selected_run||r[i].selected_calc_date)||''):null;
+
+  if(i===n||next!==current){
+   groups.push({
+    start:start,
+    end:i-1,
+    calc:current
+   });
+
+   start=i;
+   current=next;
+  }
+ }
+
+ c.save();
+
+ groups.forEach((g,k)=>{
+
+  if(!g.calc)return;
+
+  let color=colors[k%colors.length];
+
+  let x1=X(g.start);
+  let x2=X(g.end);
+
+  if(g.start>0){
+   x1=(X(g.start-1)+X(g.start))/2;
+  }
+
+  if(g.end<n-1){
+   x2=(X(g.end)+X(g.end+1))/2;
+  }
+
+  c.fillStyle=color+'22';
+
+  c.fillRect(
+   x1,
+   p.t,
+   Math.max(1,x2-x1),
+   h-p.t-p.b
+  );
+
+  c.strokeStyle=color;
+  c.lineWidth=1.5;
+  c.setLineDash([5,5]);
+
+  c.beginPath();
+  c.moveTo(x1,p.t);
+  c.lineTo(x1,h-p.b);
+  c.stroke();
+
+  c.setLineDash([]);
+
+  let label=(r[g.start].selected_run?g.calc.slice(5):g.calc.slice(5))+'計算';
+  c.font='bold 12px Segoe UI';
+
+  c.fillStyle=color;
+
+  let tw=c.measureText(label).width;
+
+  let tx=Math.min(
+   Math.max(x1+5,p.l),
+   w-p.r-tw
+  );
+
+  c.fillText(label,tx,16);
+
+ });
+
+ c.restore();
+}
+function render(){let r=rows(),m=met(r);window.__chartRows=r;status.textContent=`市場確定日: ${P.marketConfirmedThrough} | 選択最終日: ${endDate.value} | 期間: ${days}日 | 表示: ${r.length}コマ | 精度比較: ${m.n||0}コマ`;let by={};r.forEach(x=>{if(x.target_date&&!by[x.target_date])by[x.target_date]=(x.selected_run||x.selected_calc_date)||'実績のみ'});runs.innerHTML='<b>対象日ごとの採用計算日</b>'+Object.entries(by).sort().map(x=>`<div>${x[0]} → ${x[1]}</div>`).join('');kpis.innerHTML=[['MAE',f(m.mae)],['RMSE',f(m.rmse)],['Bias',f(m.bias)],['MAPE',ok(m.mape)?f(m.mape)+'%':'-'],['比較コマ',f(m.n,0)],['実績のみ',f(r.filter(x=>!ok(x.predicted_price_yen_kwh)&&ok(x.actual_price_yen_kwh)).length,0)]].map(x=>`<div class="card kpi"><span>${x[0]}</span><strong>${x[1]}</strong></div>`).join('');draw('mainChart',[{v:r.map(x=>x.predicted_price_yen_kwh),c:'#2468d4'},{v:r.map(x=>x.actual_price_yen_kwh),c:'#111827'}]);shadeRuns('mainChart',r);shadeRuns('mainChart',r);/*legend2*/(()=>{let h=$('#mainChart').parentElement.querySelector('h2');if(h&&!h.querySelector('.lg')){h.insertAdjacentHTML('beforeend','<span class="lg" style="font-size:13px;font-weight:600;margin-left:18px;color:#334155"><span style="display:inline-block;width:22px;height:3px;background:#2468d4;vertical-align:middle;margin-right:5px"></span>予測<span style="display:inline-block;width:22px;height:3px;background:#111827;vertical-align:middle;margin:0 5px 0 16px"></span>実績</span>')}})();let g={};r.forEach(x=>(g[x.target_date]??=[]).push(x));let dm=Object.values(g).map(met);drawBar('maeChart',dm.map(x=>x.mae),Object.keys(g),'#d34a44');drawBar('biasChart',dm.map(x=>x.bias),Object.keys(g),'#2468d4');body.innerHTML=r.slice().reverse().map(x=>`<tr><td>${x.target_datetime||x.target_date+' #'+x.slot}</td><td>${x.area_ja||x.area}</td><td>${x.day??'-'}</td><td>${(x.selected_run||x.selected_calc_date)||'実績のみ'}</td><td>${x.forecast_created_at||'-'}</td><td>${f(x.predicted_price_yen_kwh)}</td><td>${f(x.actual_price_yen_kwh)}</td><td>${f(x.error)}</td><td>${f(x.abs_error)}</td></tr>`).join('')}
+endDate.onchange=area.onchange=day.onchange=render;document.querySelectorAll('[data-days]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-days]').forEach(x=>x.classList.remove('on'));b.classList.add('on');days=+b.dataset.days;render()});onresize=render;render();</script></body></html>
