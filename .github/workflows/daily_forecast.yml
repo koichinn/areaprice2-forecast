@@ -17,36 +17,15 @@ jobs:
   run-forecast:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
 
     steps:
       - name: "Checkout repository"
         uses: actions/checkout@v4
         with:
-          path: p_drive/エリアプライス2
           fetch-depth: 1
-
-      - name: "Map virtual P drive"
-        shell: powershell
-        run: |
-          $target = Join-Path $env:GITHUB_WORKSPACE "p_drive"
-          subst P: $target
-          Get-PSDrive P
-
-      - name: "Restore data bundle from GitHub Release (latest-data)"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: powershell
-        run: |
-          Set-Location "$env:GITHUB_WORKSPACE\p_drive\エリアプライス2"
-          gh release download latest-data --repo "${{ github.repository }}" --pattern "cloud_release_bundle.zip" --clobber
-          if (Test-Path "cloud_release_bundle.zip") {
-            Write-Host "Extracting cloud_release_bundle.zip into P:\エリアプライス2..."
-            7z x "cloud_release_bundle.zip" -o"P:\エリアプライス2" -xr!".github" -aoa | Out-Null
-            Remove-Item "cloud_release_bundle.zip" -Force
-            Write-Host "Extraction complete."
-          } else {
-            throw "cloud_release_bundle.zip not found in release latest-data"
-          }
 
       - name: "Set up Python 3.12"
         uses: actions/setup-python@v5
@@ -54,22 +33,58 @@ jobs:
           python-version: '3.12'
 
       - name: "Install Python dependencies"
-        shell: powershell
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install numpy pandas pyarrow scikit-learn lightgbm requests urllib3 jpholiday openpyxl truststore
 
+      - name: "Map virtual P drive and restore data bundle from Release"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $pRoot = Join-Path $env:RUNNER_TEMP "p_drive"
+          New-Item -ItemType Directory -Force -Path $pRoot | Out-Null
+          subst P: $pRoot
+          Get-PSDrive P
+
+          gh release download latest-data --repo "${{ github.repository }}" --pattern "cloud_release_bundle.zip" --clobber
+          if (!(Test-Path "cloud_release_bundle.zip")) {
+            throw "cloud_release_bundle.zip not found in release latest-data"
+          }
+
+          python -c "
+          import zipfile
+          from pathlib import Path
+          dest = Path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92')
+          dest.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile('cloud_release_bundle.zip', 'r') as zf:
+              for m in zf.infolist():
+                  if m.filename.startswith('.github/'):
+                      continue
+                  zf.extract(m, dest)
+          for ps1 in dest.rglob('*.ps1'):
+              raw = ps1.read_bytes()
+              if not raw.startswith(b'\xef\xbb\xbf'):
+                  ps1.write_bytes(b'\xef\xbb\xbf' + raw)
+          print('Extracted files to:', dest)
+          "
+          Remove-Item "cloud_release_bundle.zip" -Force
+
       - name: "Set timezone to Asia/Tokyo (JST)"
-        shell: powershell
+        shell: pwsh
         run: |
           tzutil /s "Tokyo Standard Time"
           Get-Date
 
       - name: "Run daily forecast pipeline (run_daily_forecast_occto_v4.ps1)"
-        shell: powershell
+        shell: pwsh
         run: |
-          Set-Location "P:\エリアプライス2\学習"
-          powershell -ExecutionPolicy Bypass -File "P:\エリアプライス2\学習\run_daily_forecast_occto_v4.ps1" -SkipFreshnessCheck -PastStopDays 30
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $learnDir = "P:\$([char]0x30A8)$([char]0x30EA)$([char]0x30A2)$([char]0x30D7)$([char]0x30E9)$([char]0x30A4)$([char]0x30B9)2\$([char]0x5B66)$([char]0x7FD2)"
+          Set-Location $learnDir
+          $ps1Path = Join-Path $learnDir "run_daily_forecast_occto_v4.ps1"
+          powershell -ExecutionPolicy Bypass -File $ps1Path -SkipFreshnessCheck -PastStopDays 30
 
       - name: "Send forecast results via Email for Power Automate sync (Optional)"
         if: always()
@@ -79,34 +94,39 @@ jobs:
           SMTP_TO: ${{ secrets.SMTP_TO }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
-        shell: powershell
+        shell: pwsh
         run: |
           if ($env:SMTP_USER -and $env:SMTP_PASS) {
-            python "P:\エリアプライス2\学習\send_forecast_mail.py"
+            python -c "import runpy; runpy.run_path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92/\u5b66\u7fd2/send_forecast_mail.py', run_name='__main__')"
           } else {
             Write-Host "SMTP secrets not configured; skipping email step."
           }
 
-      - name: "Upload forecast outputs as GitHub Artifact"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jepx-forecast-outputs
-          path: |
-            p_drive/エリアプライス2/予測/*.csv
-            p_drive/エリアプライス2/web/*.html
-            p_drive/エリアプライス2/web/*.csv
-            p_drive/エリアプライス2/学習/logs/*.log
-          retention-days: 30
-
-      - name: "Commit latest forecast CSVs and Web HTML"
+      - name: "Copy outputs to workspace and commit to repository"
         if: success()
-        shell: powershell
+        shell: pwsh
         run: |
-          Set-Location "$env:GITHUB_WORKSPACE\p_drive\エリアプライス2"
+          python -c "
+          import shutil
+          from pathlib import Path
+          src = Path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92')
+          dst = Path('.')
+          for sub, pat in [('\u4e88\u6e2c', 'forecast_system_day1_occto_latest.csv'),
+                           ('\u4e88\u6e2c', 'forecast_day1_to_day7_latest.csv'),
+                           ('\u4e88\u6e2c', 'system_day1_compare_daily.csv'),
+                           ('web', '*.html'),
+                           ('web', '*.csv')]:
+              sdir = src / sub
+              ddir = dst / sub
+              ddir.mkdir(parents=True, exist_ok=True)
+              for f in sdir.glob(pat):
+                  if f.is_file():
+                      shutil.copy2(f, ddir / f.name)
+                      print('Copied:', ddir / f.name)
+          "
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f 予測/forecast_system_day1_occto_latest.csv 予測/forecast_day1_to_day7_latest.csv 予測/system_day1_compare_daily.csv web/*.html 2>$null
+          git add -A
           $status = git status --porcelain
           if ($status) {
             $stamp = Get-Date -Format "yyyy-MM-dd HH:mm"
@@ -117,14 +137,25 @@ jobs:
             Write-Host "No changes to commit."
           }
 
+      - name: "Upload forecast outputs as GitHub Artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jepx-forecast-outputs
+          path: |
+            予測/*.csv
+            web/*.html
+            web/*.csv
+          retention-days: 30
+
       - name: "Persist updated master data back to GitHub Release (latest-data)"
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: powershell
+        shell: pwsh
         run: |
-          Set-Location "P:\エリアプライス2\学習"
-          python "P:\エリアプライス2\学習\build_cloud_package.py"
-          if (Test-Path "P:\エリアプライス2\cloud_release_bundle.zip") {
-            gh release upload latest-data "P:\エリアプライス2\cloud_release_bundle.zip" --repo "${{ github.repository }}" --clobber
+          python -c "import runpy; runpy.run_path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92/\u5b66\u7fd2/build_cloud_package.py', run_name='__main__')"
+          $zipPath = "P:\$([char]0x30A8)$([char]0x30EA)$([char]0x30A2)$([char]0x30D7)$([char]0x30E9)$([char]0x30A4)$([char]0x30B9)2\cloud_release_bundle.zip"
+          if (Test-Path $zipPath) {
+            gh release upload latest-data $zipPath --repo "${{ github.repository }}" --clobber
           }
