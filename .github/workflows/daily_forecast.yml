@@ -1,11 +1,11 @@
-name: JEPX Daily Forecast (AreaPrice2)
+name: "JEPX Daily Forecast (AreaPrice2)"
 
 on:
   schedule:
     # 毎日 08:30 JST (前日 23:30 UTC) および 18:20 JST (当日 09:20 UTC) に自動実行
     - cron: '30 23 * * *'
     - cron: '20 9 * * *'
-  workflow_dispatch: # GitHubの画面からいつでも手動で1クリック実行可能
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,20 +16,20 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout repository into P:\エリアプライス2 structure
+      - name: "Checkout repository"
         uses: actions/checkout@v4
         with:
           path: p_drive/エリアプライス2
           fetch-depth: 1
 
-      - name: Map virtual P: drive (subst P:)
+      - name: "Map virtual P drive"
         shell: powershell
         run: |
           $target = Join-Path $env:GITHUB_WORKSPACE "p_drive"
           subst P: $target
           Get-PSDrive P
 
-      - name: Restore data bundle from GitHub Release (latest-data)
+      - name: "Restore data bundle from GitHub Release (latest-data)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: powershell
@@ -44,31 +44,30 @@ jobs:
             Write-Host "No Release bundle found; using repository files directly."
           }
 
-      - name: Set up Python 3.12
+      - name: "Set up Python 3.12"
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
 
-      - name: Install Python dependencies
+      - name: "Install Python dependencies"
         shell: powershell
         run: |
           python -m pip install --upgrade pip
           pip install numpy pandas pyarrow scikit-learn lightgbm requests urllib3 jpholiday openpyxl truststore
 
-      - name: Set timezone to Asia/Tokyo (JST)
+      - name: "Set timezone to Asia/Tokyo (JST)"
         shell: powershell
         run: |
           tzutil /s "Tokyo Standard Time"
           Get-Date
 
-      - name: Run daily forecast pipeline (run_daily_forecast_occto_v4.ps1)
+      - name: "Run daily forecast pipeline (run_daily_forecast_occto_v4.ps1)"
         shell: powershell
         run: |
           Set-Location "P:\エリアプライス2\学習"
           powershell -ExecutionPolicy Bypass -File "P:\エリアプライス2\学習\run_daily_forecast_occto_v4.ps1" -SkipFreshnessCheck -PastStopDays 30
 
-      - name: Send forecast results via Email for Power Automate sync (Optional)
+      - name: "Send forecast results via Email for Power Automate sync (Optional)"
         if: always()
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -84,7 +83,7 @@ jobs:
             Write-Host "SMTP secrets not configured; skipping email step."
           }
 
-      - name: Upload forecast outputs as GitHub Artifact
+      - name: "Upload forecast outputs as GitHub Artifact"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -96,7 +95,7 @@ jobs:
             p_drive/エリアプライス2/学習/logs/*.log
           retention-days: 30
 
-      - name: Commit latest forecast CSVs & Web HTML to repository for Power Automate
+      - name: "Commit latest forecast CSVs and Web HTML"
         if: success()
         shell: powershell
         run: |
@@ -113,7 +112,7 @@ jobs:
             Write-Host "No changes to commit."
           }
 
-      - name: Persist updated master data back to GitHub Release (latest-data)
+      - name: "Persist updated master data back to GitHub Release (latest-data)"
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
