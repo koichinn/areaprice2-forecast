@@ -1,10 +1,11 @@
 name: "JEPX Daily Forecast (AreaPrice2)"
+
 on:
   schedule:
     # 毎朝 09:00 JST (00:00 UTC) に1回自動実行
     - cron: '0 0 * * *'
   workflow_dispatch:
-  
+
 permissions:
   contents: write
 
@@ -49,7 +50,7 @@ jobs:
           }
 
           python -c "
-          import zipfile
+          import shutil, zipfile
           from pathlib import Path
           dest = Path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92')
           dest.mkdir(parents=True, exist_ok=True)
@@ -58,6 +59,17 @@ jobs:
                   if m.filename.startswith('.github/'):
                       continue
                   zf.extract(m, dest)
+          repo_root = Path('.')
+          for sub in ['\u5b66\u7fd2', 'web', 'database', '\u4e88\u6e2c', '\u4ed5\u69d8']:
+              sdir = repo_root / sub
+              if not sdir.exists():
+                  continue
+              for f in sdir.rglob('*'):
+                  if f.is_file() and f.suffix.lower() in {'.py', '.ps1', '.json', '.yml', '.yaml', '.md', '.txt'}:
+                      target = dest / f.relative_to(repo_root)
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(f, target)
+                      print('Overlayed from repo:', f.relative_to(repo_root))
           for ps1 in dest.rglob('*.ps1'):
               raw = ps1.read_bytes()
               if not raw.startswith(b'\xef\xbb\xbf'):
@@ -102,10 +114,26 @@ jobs:
         shell: pwsh
         run: |
           python -c "
-          import shutil
+          import json, re, shutil
           from pathlib import Path
           src = Path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92')
           dst = Path('.')
+          html_p = src / 'web' / 'forecast_accuracy_dashboard.html'
+          if html_p.is_file() and html_p.stat().st_size > 20 * 1024 * 1024:
+              txt = html_p.read_text(encoding='utf-8')
+              m = re.search(r'const P=(\{.*\}),D=P\.records', txt)
+              if m:
+                  obj = json.loads(m.group(1))
+                  ui_keys = {'target_date','target_datetime','slot','area','area_ja','day','selected_calc_date','selected_run','forecast_created_at','predicted_price_yen_kwh','actual_price_yen_kwh','error','abs_error'}
+                  new_recs = []
+                  for r in obj.get('records', []):
+                      nr = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k in ui_keys and v is not None and v != ''}
+                      new_recs.append(nr)
+                  obj['records'] = new_recs
+                  new_json = json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+                  txt = txt[:m.start(1)] + new_json + txt[m.end(1):]
+                  html_p.write_text(txt, encoding='utf-8')
+                  print(f'Compacted HTML to {html_p.stat().st_size / (1024*1024):.2f} MB')
           for sub, pat in [('\u4e88\u6e2c', 'forecast_system_day1_occto_latest.csv'),
                            ('\u4e88\u6e2c', 'forecast_day1_to_day7_latest.csv'),
                            ('\u4e88\u6e2c', 'system_day1_compare_daily.csv'),
