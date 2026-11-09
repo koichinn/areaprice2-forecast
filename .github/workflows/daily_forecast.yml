@@ -1,0 +1,127 @@
+name: JEPX Daily Forecast (AreaPrice2)
+
+on:
+  schedule:
+    # 毎日 08:30 JST (前日 23:30 UTC) および 18:20 JST (当日 09:20 UTC) に自動実行
+    - cron: '30 23 * * *'
+    - cron: '20 9 * * *'
+  workflow_dispatch: # GitHubの画面からいつでも手動で1クリック実行可能
+
+permissions:
+  contents: write
+
+jobs:
+  run-forecast:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository into P:\エリアプライス2 structure
+        uses: actions/checkout@v4
+        with:
+          path: p_drive/エリアプライス2
+          fetch-depth: 1
+
+      - name: Map virtual P: drive (subst P:)
+        shell: powershell
+        run: |
+          $target = Join-Path $env:GITHUB_WORKSPACE "p_drive"
+          subst P: $target
+          Get-PSDrive P
+
+      - name: Restore data bundle from GitHub Release (latest-data)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: |
+          Set-Location "$env:GITHUB_WORKSPACE\p_drive\エリアプライス2"
+          gh release download latest-data --pattern "cloud_release_bundle.zip" --clobber 2>$null
+          if (Test-Path "cloud_release_bundle.zip") {
+            Write-Host "Extracting cloud_release_bundle.zip into P:\エリアプライス2..."
+            Expand-Archive -Path "cloud_release_bundle.zip" -DestinationPath "P:\エリアプライス2" -Force
+            Remove-Item "cloud_release_bundle.zip" -Force
+          } else {
+            Write-Host "No Release bundle found; using repository files directly."
+          }
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pandas pyarrow scikit-learn lightgbm requests urllib3 jpholiday openpyxl truststore
+
+      - name: Set timezone to Asia/Tokyo (JST)
+        shell: powershell
+        run: |
+          tzutil /s "Tokyo Standard Time"
+          Get-Date
+
+      - name: Run daily forecast pipeline (run_daily_forecast_occto_v4.ps1)
+        shell: powershell
+        run: |
+          Set-Location "P:\エリアプライス2\学習"
+          powershell -ExecutionPolicy Bypass -File "P:\エリアプライス2\学習\run_daily_forecast_occto_v4.ps1" -SkipFreshnessCheck -PastStopDays 30
+
+      - name: Send forecast results via Email for Power Automate sync (Optional)
+        if: always()
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        shell: powershell
+        run: |
+          if ($env:SMTP_USER -and $env:SMTP_PASS) {
+            python "P:\エリアプライス2\学習\send_forecast_mail.py"
+          } else {
+            Write-Host "SMTP secrets not configured; skipping email step."
+          }
+
+      - name: Upload forecast outputs as GitHub Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jepx-forecast-outputs
+          path: |
+            p_drive/エリアプライス2/予測/*.csv
+            p_drive/エリアプライス2/web/*.html
+            p_drive/エリアプライス2/web/*.csv
+            p_drive/エリアプライス2/学習/logs/*.log
+          retention-days: 30
+
+      - name: Commit latest forecast CSVs & Web HTML to repository for Power Automate
+        if: success()
+        shell: powershell
+        run: |
+          Set-Location "$env:GITHUB_WORKSPACE\p_drive\エリアプライス2"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f 予測/forecast_system_day1_occto_latest.csv 予測/forecast_day1_to_day7_latest.csv 予測/system_day1_compare_daily.csv web/*.html 2>$null
+          $status = git status --porcelain
+          if ($status) {
+            $stamp = Get-Date -Format "yyyy-MM-dd HH:mm"
+            git commit -m "Auto-update JEPX forecast ($stamp JST)"
+            git push
+          } else {
+            Write-Host "No changes to commit."
+          }
+
+      - name: Persist updated master data back to GitHub Release (latest-data)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: |
+          Set-Location "P:\エリアプライス2\学習"
+          python "P:\エリアプライス2\学習\build_cloud_package.py"
+          if (Test-Path "P:\エリアプライス2\cloud_release_bundle.zip") {
+            Set-Location "$env:GITHUB_WORKSPACE\p_drive\エリアプライス2"
+            gh release upload latest-data "P:\エリアプライス2\cloud_release_bundle.zip" --clobber
+          }
