@@ -72,6 +72,7 @@ ESSENTIAL_DATA_GLOBS = [
     "学習/tokyo_day1_v4_calib.json",
     # 予測・web出力の最新CSV
     "予測/*latest*.csv",
+    "予測/tokyo_day1_v4_pred_history.csv",
     "予測/*compare*.csv",
     "web/*.csv",
     "web/*.html",
