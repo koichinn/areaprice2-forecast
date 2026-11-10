@@ -411,5 +411,12 @@
     "occ_diff_tok_chu_wide_res",
     "dcal_wf_chubu_solar_effective_wm2",
     "d2_wf_shortwave_radiation_wm2"
-  ]
+  ],
+  "grand_ensemble": {
+    "enabled": true,
+    "w_lgb_day": 0.3,
+    "w_lgb_night": 0.1,
+    "fixed_weighted_mae": 2.604,
+    "wf_weighted_mae": 2.6083
+  }
 }
