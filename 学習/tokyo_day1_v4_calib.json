@@ -417,6 +417,15 @@
     "w_lgb_day": 0.3,
     "w_lgb_night": 0.1,
     "fixed_weighted_mae": 2.604,
-    "wf_weighted_mae": 2.6083
+    "wf_weighted_mae": 2.6083,
+    "strict_wf_mae": 2.6038,
+    "fixed_mae": 2.6024
+  },
+  "ic_decoupling": {
+    "enabled": true,
+    "fc_thresh": 200.0,
+    "w_direct_sat": 0.6,
+    "strict_wf_mae": 2.6038,
+    "fixed_mae": 2.6024
   }
 }
