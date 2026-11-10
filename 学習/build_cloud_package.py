@@ -60,9 +60,13 @@ ESSENTIAL_DATA_GLOBS = [
     "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_system_natwf_day1.parquet",
     "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_area_day1.parquet",
     "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_day2_to_day7.parquet",
+    "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_*_day1.parquet",
+    "database/統合データ/training_v8_price_regime/jepx_training_v8_*_premium_day1.parquet",
     # 学習フォルダ内の必須データ
     "学習/evaluation_system_day1_levers_da/occto_da8.parquet",
+    "学習/evaluation_system_day1_levers_da/occto_area_ic_da.parquet",
     "学習/system_day1_v3_calib.json",
+    "学習/tokyo_day1_v4_calib.json",
     # 予測・web出力の最新CSV
     "予測/*latest*.csv",
     "予測/*compare*.csv",
