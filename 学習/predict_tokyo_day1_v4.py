@@ -213,6 +213,28 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     w_lgb = is_day * w_lgb_day + (1.0 - is_day) * w_lgb_night
     pred_final = (1.0 - w_lgb) * v4_hgb + w_lgb * lgb_direct
 
+    # 5. 連系線物理ディカップリング (IC Physical Decoupling)
+    # 東西FCの空き容量が逼迫 (<= 200MW) している昼帯コマは、システム価格連動を切り離し東京直接モデル比率を高める
+    if "ic_fc_bwd_free" in d.columns:
+        fc_bwd_free = pd.to_numeric(d["ic_fc_bwd_free"], errors="coerce").to_numpy(float)[te]
+        fc_bwd_free = np.where(np.isnan(fc_bwd_free), 999.0, fc_bwd_free)
+    else:
+        fc_bwd_free = np.full(48, 999.0)
+
+    tok_cal = 0.20 * c["pred_tok_cal_day"] + 0.25 * c["pred_tok_cal_wide"] + 0.25 * c["pred_tok_cal_wide_deep"] + 0.15 * c["pred_tok_cal_blk4"] + 0.15 * c["pred_tok_cal_blk6"]
+    tok_sim = 0.55 * c["pred_tok_sim_wide"] + 0.45 * c["pred_tok_sim_blk6"]
+    tok_lag1 = 0.60 * c["pred_tok_lag1_wide"] + 0.40 * c["pred_tok_lag1_blk6"]
+    hgb_direct_l1 = (0.30 * tok_cal + 0.15 * tok_sim + 0.10 * tok_lag1) / 0.55
+    hgb_direct_q65 = 0.60 * c["pred_tok_cal_q65"] + 0.40 * c["pred_tok_sim_q65"]
+    hgb_direct = 0.70 * hgb_direct_q65 + 0.20 * hgb_direct_l1 + 0.10 * c["anc_cal"]
+    pure_direct = 0.50 * hgb_direct + 0.50 * lgb_direct
+
+    is_sat = (is_day == 1) & (fc_bwd_free <= 200.0)
+    pred_final = np.where(is_sat, 0.40 * v4_hgb + 0.60 * pure_direct, pred_final)
+    sat_count = int(is_sat.sum())
+    if sat_count > 0:
+        print(f"  [IC Decoupling] 東西FC混雑検出: {sat_count} コマで東京直接比率を強化しました")
+
     print(f"  全モデル推論＆グランドアンサンブル合成完了 ({time.time() - t0:.1f}s)")
     sys.stdout.flush()
 
@@ -227,7 +249,7 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
         "system_pred": p_sys,
         "premium_pred": pred_final - p_sys,
         "anchor_lag1d": d["area_price_yen_kwh_lag1d"].to_numpy(float)[te],
-        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks)",
+        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks+IC_Decoupling)",
         "forecast_created_at": datetime.now().astimezone().isoformat(),
         "train_rows": int(tr.sum()),
     })
