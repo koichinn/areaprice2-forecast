@@ -135,6 +135,8 @@ jobs:
                   html_p.write_text(txt, encoding='utf-8')
                   print(f'Compacted HTML to {html_p.stat().st_size / (1024*1024):.2f} MB')
           for sub, pat in [('\u4e88\u6e2c', 'forecast_system_day1_occto_latest.csv'),
+                           ('\u4e88\u6e2c', 'forecast_area_day1_recon_latest.csv'),
+                           ('\u4e88\u6e2c', 'forecast_tokyo_day1_v4_latest.csv'),
                            ('\u4e88\u6e2c', 'forecast_day1_to_day7_latest.csv'),
                            ('\u4e88\u6e2c', 'system_day1_compare_daily.csv'),
                            ('web', '*.html'),
