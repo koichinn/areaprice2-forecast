@@ -235,6 +235,27 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     if sat_count > 0:
         print(f"  [IC Decoupling] 東西FC混雑検出: {sat_count} コマで東京直接比率を強化しました")
 
+    # 6. 発電所停止シールド (Outage Tightness Shield)
+    # 東京エリア内の火力停止容量（LNG・石炭・石油）が 9,000 MW 以上のとき、メリットオーダー急上昇によるスパイクを防御
+    out_parquet = Path(r"P:\エリアプライス2\database\outages_features_day1.parquet")
+    outage_mw = np.zeros(48)
+    if out_parquet.exists():
+        try:
+            df_out = pd.read_parquet(out_parquet)
+            df_out["target_datetime"] = pd.to_datetime(df_out["target_datetime"])
+            sub_out = df_out[(df_out["target_datetime"] >= idx[0]) & (df_out["target_datetime"] <= idx[-1])].sort_values("target_datetime")
+            if len(sub_out) == 48 and "outage_tokyo_thermal_mw" in sub_out.columns:
+                outage_mw = sub_out["outage_tokyo_thermal_mw"].fillna(0.0).to_numpy(float)
+        except Exception as e:
+            print(f"  [Outage Shield Warning] Parquet読み込みスキップ: {e}")
+
+    upper_pred = 0.50 * c["pred_tok_cal_q65"] + 0.30 * lgb_tok_q65 + 0.20 * c["pred_tok_sim_q65"]
+    is_high_outage = (is_day == 1) & (outage_mw >= 9000.0)
+    outage_count = int(is_high_outage.sum())
+    if outage_count > 0:
+        pred_final = np.where(is_high_outage, 0.80 * pred_final + 0.20 * upper_pred, pred_final)
+        print(f"  [Outage Shield] 東京火力大規模停止検出 (>=9,000MW): {outage_count} コマでスパイクシールドを発動しました (Mean Outage: {outage_mw[is_high_outage].mean():.0f} MW)")
+
     print(f"  全モデル推論＆グランドアンサンブル合成完了 ({time.time() - t0:.1f}s)")
     sys.stdout.flush()
 
@@ -249,7 +270,7 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
         "system_pred": p_sys,
         "premium_pred": pred_final - p_sys,
         "anchor_lag1d": d["area_price_yen_kwh_lag1d"].to_numpy(float)[te],
-        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks+IC_Decoupling)",
+        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks+IC_Decoupling+Outage_Shield)",
         "forecast_created_at": datetime.now().astimezone().isoformat(),
         "train_rows": int(tr.sum()),
     })
