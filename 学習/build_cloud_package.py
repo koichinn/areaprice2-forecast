@@ -49,6 +49,9 @@ ESSENTIAL_DATA_GLOBS = [
     "database/天気9エリア/forecast_history/*.csv",
     # OCCTOデータ (特徴量parquetと直近ダウンロードCSV)
     "database/occtoデータ/features/*.parquet",
+    # 発電所停止データ (Outages)
+    "database/outages_features_day1.parquet",
+    "database/outages_*.csv",
     # 統合データ (日次パイプラインが読み書きするコアファイル)
     "database/統合データ/past_integrated_9area_30min.parquet",
     "database/統合データ/future_integrated_9area_30min.parquet",
