@@ -9,7 +9,7 @@
 出力: DAY1 48コマの予測値 (predicted_price_yen_kwh)
 """
 from __future__ import annotations
-import argparse, json, sys, time
+import argparse, json, os, sys, time
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -75,6 +75,61 @@ def load_calib() -> tuple[float, float, list[str] | None, list[str] | None, floa
         except Exception:
             pass
     return ft.DEFAULT_WQ, ft.DEFAULT_WA, None, None, w_lgb_day, w_lgb_night
+
+
+# ---- 水準ドリフト補正 (Level Drift Correction) ----
+PRED_HISTORY_CSV = OUT_DIR / "tokyo_day1_v4_pred_history.csv"
+DRIFT_K = 0.50          # 補正の強さ
+DRIFT_SPAN = 3          # 日次残差 EWMA の span
+DRIFT_LOOKBACK_DAYS = 14  # これより古い残差しか無い場合は補正しない
+
+
+def load_pred_history() -> pd.DataFrame:
+    """P: 側の履歴と、GitHub Actions 上ではリポジトリにコミット済みの履歴を統合して返す。"""
+    paths = [PRED_HISTORY_CSV]
+    ws = os.environ.get("GITHUB_WORKSPACE")
+    if ws:
+        paths.append(Path(ws) / "予測" / PRED_HISTORY_CSV.name)
+    frames = []
+    for p in paths:
+        if p.exists():
+            try:
+                h = pd.read_csv(p, encoding="utf-8-sig")
+                h["target_datetime"] = pd.to_datetime(h["target_datetime"])
+                frames.append(h)
+            except Exception as e:
+                print(f"  [Drift Warning] 履歴読み込み失敗 {p}: {e}")
+    if not frames:
+        return pd.DataFrame(columns=["target_datetime", "pred_raw", "source"])
+    h = pd.concat(frames, ignore_index=True)
+    h["_live"] = (h.get("source", "") == "live").astype(int)
+    h = h.sort_values(["target_datetime", "_live"]).drop_duplicates("target_datetime", keep="last")
+    return h.drop(columns="_live").reset_index(drop=True)
+
+
+def compute_drift_bias(actual: pd.DataFrame, day: pd.Timestamp) -> float:
+    """確定済み実績(D-1以前)と補正前予測の日次中央値残差の EWMA を返す。"""
+    h = load_pred_history()
+    if h.empty:
+        return 0.0
+    m = h.merge(actual, on="target_datetime", how="inner")
+    m = m[m["target_datetime"] < day.normalize()]
+    m = m[m["target_datetime"] >= day.normalize() - pd.Timedelta(days=DRIFT_LOOKBACK_DAYS)]
+    if m.empty:
+        return 0.0
+    m["date"] = m["target_datetime"].dt.normalize()
+    daily = (m["y"] - m["pred_raw"]).groupby(m["date"]).median().sort_index()
+    if len(daily) < 2:
+        return 0.0
+    return float(daily.ewm(span=DRIFT_SPAN).mean().iloc[-1])
+
+
+def update_pred_history(idx: pd.DatetimeIndex, pred_raw: np.ndarray) -> None:
+    h = load_pred_history()
+    h = h[~h["target_datetime"].isin(idx)]
+    new = pd.DataFrame({"target_datetime": idx, "pred_raw": pred_raw, "source": "live"})
+    h = pd.concat([h, new], ignore_index=True).sort_values("target_datetime")
+    h.to_csv(PRED_HISTORY_CSV, index=False, encoding="utf-8-sig")
 
 
 def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float = 0.35) -> pd.DataFrame:
@@ -235,26 +290,19 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     if sat_count > 0:
         print(f"  [IC Decoupling] 東西FC混雑検出: {sat_count} コマで東京直接比率を強化しました")
 
-    # 6. 発電所停止シールド (Outage Tightness Shield)
-    # 東京エリア内の火力停止容量（LNG・石炭・石油）が 9,000 MW 以上のとき、メリットオーダー急上昇によるスパイクを防御
-    out_parquet = Path(r"P:\エリアプライス2\database\outages_features_day1.parquet")
-    outage_mw = np.zeros(48)
-    if out_parquet.exists():
-        try:
-            df_out = pd.read_parquet(out_parquet)
-            df_out["target_datetime"] = pd.to_datetime(df_out["target_datetime"])
-            sub_out = df_out[(df_out["target_datetime"] >= idx[0]) & (df_out["target_datetime"] <= idx[-1])].sort_values("target_datetime")
-            if len(sub_out) == 48 and "outage_tokyo_thermal_mw" in sub_out.columns:
-                outage_mw = sub_out["outage_tokyo_thermal_mw"].fillna(0.0).to_numpy(float)
-        except Exception as e:
-            print(f"  [Outage Shield Warning] Parquet読み込みスキップ: {e}")
-
-    upper_pred = 0.50 * c["pred_tok_cal_q65"] + 0.30 * lgb_tok_q65 + 0.20 * c["pred_tok_sim_q65"]
-    is_high_outage = (is_day == 1) & (outage_mw >= 9000.0)
-    outage_count = int(is_high_outage.sum())
-    if outage_count > 0:
-        pred_final = np.where(is_high_outage, 0.80 * pred_final + 0.20 * upper_pred, pred_final)
-        print(f"  [Outage Shield] 東京火力大規模停止検出 (>=9,000MW): {outage_count} コマでスパイクシールドを発動しました (Mean Outage: {outage_mw[is_high_outage].mean():.0f} MW)")
+    # 6. 水準ドリフト補正 (Level Drift Correction)
+    # 確定済み (D-1以前) の「実績 - 補正前予測」の日次中央値を EWMA(span=3) で平滑化し、その 50% を加算する。
+    # 厳密WF検証: MAE 2.6054 -> 2.5723。履歴は予測/tokyo_day1_v4_pred_history.csv に蓄積。
+    pred_raw = pred_final.copy()
+    drift_bias = 0.0
+    try:
+        actual = pd.DataFrame({"target_datetime": t[tr].to_numpy(), "y": y_tok[tr]}).dropna()
+        drift_bias = compute_drift_bias(actual, day)
+    except Exception as e:
+        print(f"  [Drift Warning] ドリフト補正をスキップ: {e}")
+    pred_final = pred_raw + DRIFT_K * drift_bias
+    print(f"  [Drift] 水準ドリフト補正: bias={drift_bias:+.3f} 円 x k={DRIFT_K} -> {DRIFT_K * drift_bias:+.3f} 円")
+    update_pred_history(idx, pred_raw)
 
     print(f"  全モデル推論＆グランドアンサンブル合成完了 ({time.time() - t0:.1f}s)")
     sys.stdout.flush()
@@ -270,7 +318,9 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
         "system_pred": p_sys,
         "premium_pred": pred_final - p_sys,
         "anchor_lag1d": d["area_price_yen_kwh_lag1d"].to_numpy(float)[te],
-        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks+IC_Decoupling+Outage_Shield)",
+        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks+IC_Decoupling+Drift_Correction)",
+        "pred_raw_before_drift": pred_raw,
+        "drift_adjust": DRIFT_K * drift_bias,
         "forecast_created_at": datetime.now().astimezone().isoformat(),
         "train_rows": int(tr.sum()),
     })
