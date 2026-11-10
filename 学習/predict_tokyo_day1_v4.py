@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""東京エリア価格 DAY1 専用予測スクリプト v4 (v4_tokyo Super-Ensemble)
+"""東京エリア価格 DAY1 専用予測スクリプト v4 (Grand Ensemble: HGB + LightGBM Physical Blocks)
 - Path A (Tokyo Direct): 東京カレンダー同期 (anc_cal) + 予報類似度 (anc_sim) + L1 (DAY/WIDE/DEEP/BLK4/BLK6) + q65/q35
 - Path B (Reconstructed): System v4_sub2_super + 東京プレミアム (anc_cal_prem / anc_sim_prem / WIDE / BLOCKS6 / q65)
 - Path C (Partial-Coupling Z07): 0.70 * System v4_sub2_super + Z07 (WIDE / BLOCKS6 / q65)
-- 結合アンカー: 0.35 * anc_sim_tok + 0.35 * (0.7*p_sys + anc_sim_z07) + 0.30 * (anc_cal_tok + 0.7*(p_sys - anc_cal_sys))
-- キャリブレーション: tokyo_day1_v4_calib.json の最適ブレンド (wq=0.70, wa=0.10)
+- LightGBM Physical Blocks: 5物理ブロック（夜間、朝ランプ、太陽光&FC閉塞、夕点灯&火力ピーク、深夜減衰）× 分位点q60/q65/q70/L1
+- グランドアンサンブル: 昼帯(07:00-20:30) HGB 70% + LGB 30%、夜間帯 HGB 90% + LGB 10%
 出力: DAY1 48コマの予測値 (predicted_price_yen_kwh)
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import lightgbm as lgb
 
 sys.path.insert(0, r"P:\エリアプライス2\学習")
 import build_fast_eval_cache_tokyo_day1 as B
@@ -23,8 +24,43 @@ INTEG = Path(r"P:\エリアプライス2\database\統合データ")
 OUT_DIR = Path(r"P:\エリアプライス2\予測")
 CALIB_JSON = Path(r"P:\エリアプライス2\学習\tokyo_day1_v4_calib.json")
 
+BLOCKS_PHYSICAL = [
+    [0, 1, 2, 3, 4, 5, 6],       # Night baseline
+    [7, 8],                      # Morning ramp
+    [9, 10, 11, 12, 13, 14],     # Solar peak & FC saturation
+    [15, 16, 17, 18, 19],        # Evening lighting ramp & thermal peak
+    [20, 21, 22, 23],            # Late night decay
+]
 
-def load_calib() -> tuple[float, float, list[str] | None, list[str] | None]:
+
+def lgb_fit_predict(Xtr, htr, rtr, Xte, hte, blocks, objective="mae", alpha=0.5, n_est=180, lr=0.045, leaf=31, seed=42):
+    p = np.zeros(len(Xte))
+    valid_tr = np.isfinite(rtr)
+    for hs in blocks:
+        m = np.isin(htr, hs) & valid_tr
+        s = np.isin(hte, hs)
+        if s.any() and m.sum() > 400:
+            mdl = lgb.LGBMRegressor(
+                objective=objective,
+                alpha=alpha,
+                n_estimators=n_est,
+                learning_rate=lr,
+                num_leaves=leaf,
+                min_child_samples=25,
+                subsample=0.85,
+                colsample_bytree=0.85,
+                n_jobs=-1,
+                random_state=seed,
+                verbose=-1
+            )
+            mdl.fit(Xtr[m], rtr[m])
+            p[s] = mdl.predict(Xte[s])
+    return p
+
+
+def load_calib() -> tuple[float, float, list[str] | None, list[str] | None, float, float]:
+    w_lgb_day = 0.30
+    w_lgb_night = 0.10
     if CALIB_JSON.exists():
         try:
             cfg = json.loads(CALIB_JSON.read_text(encoding="utf-8"))
@@ -32,10 +68,13 @@ def load_calib() -> tuple[float, float, list[str] | None, list[str] | None]:
             wa = float(cfg.get("wa", ft.DEFAULT_WA))
             tok_f = cfg.get("tok_feats")
             prem_f = cfg.get("prem_feats")
-            return wq, wa, tok_f, prem_f
+            ge = cfg.get("grand_ensemble", {})
+            w_lgb_day = float(ge.get("w_lgb_day", 0.30))
+            w_lgb_night = float(ge.get("w_lgb_night", 0.10))
+            return wq, wa, tok_f, prem_f, w_lgb_day, w_lgb_night
         except Exception:
             pass
-    return ft.DEFAULT_WQ, ft.DEFAULT_WA, None, None
+    return ft.DEFAULT_WQ, ft.DEFAULT_WA, None, None, w_lgb_day, w_lgb_night
 
 
 def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float = 0.35) -> pd.DataFrame:
@@ -48,25 +87,28 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     if fa_path.exists():
         try:
             fa = pd.read_parquet(fa_path)
-            tok_fa = fa[(fa["area"] == "tokyo") & (pd.to_datetime(fa["target_datetime"]).isin(idx))].copy()
-            if len(tok_fa) == 48:
-                extra_df = tok_fa
+            t_col = "target_datetime" if "target_datetime" in fa.columns else "datetime"
+            fa[t_col] = pd.to_datetime(fa[t_col])
+            sub = fa[(fa["area"] == "tokyo") & (fa[t_col].isin(idx))].copy()
+            if len(sub) == 48:
+                sub = sub.sort_values(t_col).reset_index(drop=True)
+                sub["target_datetime"] = sub[t_col]
+                extra_df = sub
+                print(f"  将来DAY1東京特徴量を future_area_day1_area.parquet から読み込みました ({len(extra_df)}行)")
         except Exception as e:
-            print(f"WARN future_area_day1_area 読み込み: {e}")
+            print(f"  future_area_day1_area.parquet 読み込みスキップ: {e}")
 
-    # 1. 過去学習データ + extra行の統合特徴量エンジニアリング
+    # 1. データと特徴量エンジニアリング
+    print(f"=== 東京DAY1予測 (Grand Ensemble v4) 開始: {day.strftime('%Y-%m-%d')} ===")
+    t_start = time.time()
     d, aux, cand_cols, must_keep = B.load_and_engineer_tokyo(extra=extra_df)
+
     t = pd.to_datetime(d["target_datetime"])
+    te = (t >= idx[0]) & (t <= idx[-1])
+    assert te.sum() == 48, f"テストコマ数が48ではありません: {te.sum()}"
+    tr = t < idx[0]
+
     hour = t.dt.hour.to_numpy()
-
-    # 学習期間: day - 1日以前 (リークゼロ)
-    tr = (t < day.normalize() - pd.Timedelta(days=1)).to_numpy() & d["target"].notna()
-
-    # 2. 予測対象日（day）のインデックスを取得
-    te = t.isin(idx).to_numpy()
-    if te.sum() != 48:
-        raise RuntimeError(f"対象日 {day.date()} の48コマが特徴量データセットに見つかりません (一致コマ数: {te.sum()})")
-
     htr, hte = hour[tr], hour[te]
     y_tok = d["target"].to_numpy(float)
     y_sys = d["y_sys"].to_numpy(float)
@@ -91,7 +133,7 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     res_z07_sim = y_z07 - anc_sim_z07
 
     # 特徴量抽出 (calib.jsonに保存されていればキャッシュを使用)
-    wq, wa, tok_feats_saved, prem_feats_saved = load_calib()
+    wq, wa, tok_feats_saved, prem_feats_saved, w_lgb_day, w_lgb_night = load_calib()
     if tok_feats_saved and all(c in d.columns for c in tok_feats_saved):
         tok_feats = tok_feats_saved
     else:
@@ -113,10 +155,10 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     DAY_SPLIT = [B.DAY, [h for h in range(24) if h not in B.DAY]]
     WIDE_SPLIT = [B.WIDE, [h for h in range(24) if h not in B.WIDE]]
 
-    # 3. モデル推論
+    # 3. HGB モデル推論
     c = {}
     t0 = time.time()
-    print("  [1/3] Path A (Tokyo Direct) 推論中...")
+    print("  [1/4] Path A (Tokyo Direct HGB) 推論中...")
     sys.stdout.flush()
     c["pred_tok_cal_day"] = anc_cal_tok[te] + B.blocks_fit_pred(X_tok[tr], htr, res_tok_cal[tr], X_tok[te], hte, DAY_SPLIT, iter_scale=iter_scale, seed=10)
     c["pred_tok_cal_wide"] = anc_cal_tok[te] + B.blocks_fit_pred(X_tok[tr], htr, res_tok_cal[tr], X_tok[te], hte, WIDE_SPLIT, iter_scale=iter_scale, seed=11)
@@ -130,13 +172,13 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     c["pred_tok_lag1_wide"] = d["area_price_yen_kwh_lag1d"].to_numpy(float)[te] + B.blocks_fit_pred(X_tok[tr], htr, res_tok_lag1[tr], X_tok[te], hte, WIDE_SPLIT, iter_scale=iter_scale, seed=20)
     c["pred_tok_lag1_blk6"] = d["area_price_yen_kwh_lag1d"].to_numpy(float)[te] + B.blocks_fit_pred(X_tok[tr], htr, res_tok_lag1[tr], X_tok[te], hte, B.BLOCKS6, iter_scale=iter_scale, seed=21)
 
-    print(f"  [2/3] Path B (Reconstructed Premium) 推論中... ({time.time() - t0:.1f}s)")
+    print(f"  [2/4] Path B (Reconstructed Premium HGB) 推論中... ({time.time() - t0:.1f}s)")
     sys.stdout.flush()
     c["pred_prem_cal_wide"] = anc_cal_prem[te] + B.blocks_fit_pred(X_prem[tr], htr, res_prem_cal[tr], X_prem[te], hte, WIDE_SPLIT, iter_scale=iter_scale, seed=30)
     c["pred_prem_cal_blk6"] = anc_cal_prem[te] + B.blocks_fit_pred(X_prem[tr], htr, res_prem_cal[tr], X_prem[te], hte, B.BLOCKS6, iter_scale=iter_scale, seed=31)
     c["pred_prem_cal_q65"] = anc_cal_prem[te] + B.blocks_fit_pred(X_prem[tr], htr, res_prem_cal[tr], X_prem[te], hte, WIDE_SPLIT, loss="quantile", quantile=0.65, iter_scale=iter_scale, seed=32)
 
-    print(f"  [3/3] Path C (Partial Coupling Z07) 推論中... ({time.time() - t0:.1f}s)")
+    print(f"  [3/4] Path C (Partial Coupling Z07 HGB) 推論中... ({time.time() - t0:.1f}s)")
     sys.stdout.flush()
     c["pred_z07_cal_wide"] = anc_cal_z07[te] + B.blocks_fit_pred(X_prem[tr], htr, res_z07_cal[tr], X_prem[te], hte, WIDE_SPLIT, iter_scale=iter_scale, seed=40)
     c["pred_z07_cal_blk6"] = anc_cal_z07[te] + B.blocks_fit_pred(X_prem[tr], htr, res_z07_cal[tr], X_prem[te], hte, B.BLOCKS6, iter_scale=iter_scale, seed=41)
@@ -151,22 +193,41 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     c["anc_cal"] = anc_cal_tok[te]
     c["anc_cal_sys"] = aux["anc_cal_sys"][te]
 
-    # 4. スーパーアンサンブル合成
+    # HGB スーパーアンサンブル合成
     comp = ft.components(c, p_sys)
-    pred_final = ft.final_pred(comp, wq, wa)
-    print(f"  全モデル推論完了 ({time.time() - t0:.1f}s)")
+    v4_hgb = ft.final_pred(comp, wq, wa)
+
+    # 4. LightGBM 物理ブロック推論
+    print(f"  [4/4] LightGBM 物理ブロックモデル推論中... ({time.time() - t0:.1f}s)")
+    sys.stdout.flush()
+    lgb_tok_q60 = anc_cal_tok[te] + lgb_fit_predict(X_tok[tr], htr, res_tok_cal[tr], X_tok[te], hte, BLOCKS_PHYSICAL, objective="quantile", alpha=0.60, seed=101)
+    lgb_tok_q65 = anc_cal_tok[te] + lgb_fit_predict(X_tok[tr], htr, res_tok_cal[tr], X_tok[te], hte, BLOCKS_PHYSICAL, objective="quantile", alpha=0.65, seed=102)
+    lgb_tok_sim_q65 = anc_sim_tok[te] + lgb_fit_predict(X_tok[tr], htr, res_tok_sim[tr], X_tok[te], hte, BLOCKS_PHYSICAL, objective="quantile", alpha=0.65, seed=103)
+    lgb_tok_l1 = anc_cal_tok[te] + lgb_fit_predict(X_tok[tr], htr, res_tok_cal[tr], X_tok[te], hte, BLOCKS_PHYSICAL, objective="mae", seed=104)
+
+    lgb_direct = 0.40 * lgb_tok_q60 + 0.30 * lgb_tok_q65 + 0.20 * lgb_tok_sim_q65 + 0.10 * lgb_tok_l1
+
+    # 時間帯別適応ブレンド (Grand Ensemble)
+    slot = np.arange(48)
+    is_day = ((slot >= 14) & (slot <= 41)).astype(float)
+    w_lgb = is_day * w_lgb_day + (1.0 - is_day) * w_lgb_night
+    pred_final = (1.0 - w_lgb) * v4_hgb + w_lgb * lgb_direct
+
+    print(f"  全モデル推論＆グランドアンサンブル合成完了 ({time.time() - t0:.1f}s)")
     sys.stdout.flush()
 
     res_df = pd.DataFrame({
         "target_datetime": idx,
         "area": "tokyo",
         "predicted_price_yen_kwh": pred_final,
+        "hgb_super": v4_hgb,
+        "lgb_physical": lgb_direct,
         "direct": comp["l1"],
         "reconstructed": comp["q65"],
         "system_pred": p_sys,
         "premium_pred": pred_final - p_sys,
         "anchor_lag1d": d["area_price_yen_kwh_lag1d"].to_numpy(float)[te],
-        "model_used": "v4_tokyo_super(PathA+B+C)",
+        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks)",
         "forecast_created_at": datetime.now().astimezone().isoformat(),
         "train_rows": int(tr.sum()),
     })
@@ -183,24 +244,24 @@ def main():
     sysf = pd.read_csv(a.system, encoding="utf-8-sig")
     sysf["target_datetime"] = pd.to_datetime(sysf["target_datetime"])
     day = pd.Timestamp(a.date) if a.date else sysf["target_datetime"].min().normalize()
-    idx = pd.date_range(day, periods=48, freq="30min")
 
-    sp_series = sysf.drop_duplicates("target_datetime", keep="last").set_index("target_datetime")["predicted_system_price_yen_kwh"].reindex(idx)
-    if sp_series.isna().any():
-        print(f"ERROR: システム専用予測が {day.date()} の48コマ揃っていません")
-        return 1
+    sub = sysf[(sysf["target_datetime"] >= day) & (sysf["target_datetime"] < day + pd.Timedelta(days=1))].copy()
+    sub = sub.sort_values("target_datetime").reset_index(drop=True)
+    assert len(sub) == 48, f"システム予測が48コマありません: {len(sub)}"
+    sys_c = "predicted_price_yen_kwh" if "predicted_price_yen_kwh" in sub.columns else "predicted_system_price_yen_kwh"
+    p_sys = sub[sys_c].to_numpy(float)
 
-    print(f"=== 東京DAY1 v4_tokyo予測開始: DAY1={day.date()} ===", flush=True)
-    t0 = time.time()
-    res = predict_tokyo_day1(day, sp_series.to_numpy(float), iter_scale=a.iter_scale)
-    el = time.time() - t0
-    print(f"OK 東京DAY1 v4予測完了 ({el:.1f}s): 平均={res['predicted_price_yen_kwh'].mean():.2f} 最小={res['predicted_price_yen_kwh'].min():.2f} 最大={res['predicted_price_yen_kwh'].max():.2f}")
+    res = predict_tokyo_day1(day, p_sys, iter_scale=a.iter_scale)
 
-    out_p = OUT_DIR / "forecast_tokyo_day1_v4_latest.csv"
-    res.to_csv(out_p, index=False, encoding="utf-8-sig")
-    print(f"保存完了: {out_p}")
-    return 0
+    out_csv = OUT_DIR / f"forecast_tokyo_day1_v4_{day.strftime('%Y%m%d')}.csv"
+    latest_csv = OUT_DIR / "forecast_tokyo_day1_v4_latest.csv"
+    res.to_csv(out_csv, index=False, encoding="utf-8-sig")
+    res.to_csv(latest_csv, index=False, encoding="utf-8-sig")
+    print(f"\n[OK] 保存完了:")
+    print(f"  - {out_csv}")
+    print(f"  - {latest_csv}")
+    print(f"\n[サマリー] 平均: {res['predicted_price_yen_kwh'].mean():.2f} 円, 最小: {res['predicted_price_yen_kwh'].min():.2f} 円, 最大: {res['predicted_price_yen_kwh'].max():.2f} 円")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
