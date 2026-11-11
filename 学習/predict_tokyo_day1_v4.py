@@ -163,6 +163,36 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     assert te.sum() == 48, f"テストコマ数が48ではありません: {te.sum()}"
     tr = t < idx[0]
 
+    # 1.1 スプレッド＆価格水準ドリフト特徴量エンジニアリング (確定D-1以前の価格から生成)
+    l1_t_raw = pd.to_numeric(d["area_price_yen_kwh_lag1d"], errors="coerce").fillna(20.0).to_numpy(float)
+    l1_s_raw = pd.to_numeric(d["システムプライス(円/kWh)_lag1d"], errors="coerce").fillna(20.0).to_numpy(float)
+    l1_p_raw = l1_t_raw - l1_s_raw
+
+    d["_tmp_l1_tok"] = l1_t_raw
+    d["_tmp_l1_sys"] = l1_s_raw
+    d["_tmp_l1_prem"] = l1_p_raw
+    d["_date"] = t.dt.normalize()
+
+    daily_summary = d.groupby("_date").agg({
+        "_tmp_l1_tok": "mean",
+        "_tmp_l1_sys": "mean",
+        "_tmp_l1_prem": "mean",
+    }).sort_index()
+
+    for span in [3, 7, 14, 28]:
+        daily_summary[f"tok_price_ewma_{span}d"] = daily_summary["_tmp_l1_tok"].ewm(span=span, min_periods=2).mean()
+        daily_summary[f"sys_price_ewma_{span}d"] = daily_summary["_tmp_l1_sys"].ewm(span=span, min_periods=2).mean()
+        daily_summary[f"prem_spread_ewma_{span}d"] = daily_summary["_tmp_l1_prem"].ewm(span=span, min_periods=2).mean()
+
+    daily_summary["prem_momentum_3_14"] = daily_summary["prem_spread_ewma_3d"] - daily_summary["prem_spread_ewma_14d"]
+    daily_summary["prem_momentum_7_28"] = daily_summary["prem_spread_ewma_7d"] - daily_summary["prem_spread_ewma_28d"]
+    daily_summary["tok_price_momentum_3_14"] = daily_summary["tok_price_ewma_3d"] - daily_summary["tok_price_ewma_14d"]
+    daily_summary["tok_sys_ratio_ewma_7d"] = daily_summary["tok_price_ewma_7d"] / (daily_summary["sys_price_ewma_7d"].clip(lower=1.0))
+
+    new_drift_feats = [c for c in daily_summary.columns if "ewma" in c or "momentum" in c or "ratio" in c]
+    d = d.merge(daily_summary[new_drift_feats], on="_date", how="left")
+    print(f"  スプレッド＆水準ドリフト特徴量追加完了: {len(new_drift_feats)}列")
+
     hour = t.dt.hour.to_numpy()
     htr, hte = hour[tr], hour[te]
     y_tok = d["target"].to_numpy(float)
@@ -194,6 +224,9 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     else:
         print("  tok_feats を再計算中...")
         tok_feats = B.select_top_features(d, cand_cols, res_tok_cal, must_keep, top_k=195)
+
+    # スプレッドドリフト特徴量を確実に含める
+    tok_feats = sorted(list(set(tok_feats) | set(new_drift_feats)))
 
     if prem_feats_saved and all(c in d.columns for c in prem_feats_saved):
         prem_feats = prem_feats_saved
@@ -318,7 +351,7 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
         "system_pred": p_sys,
         "premium_pred": pred_final - p_sys,
         "anchor_lag1d": d["area_price_yen_kwh_lag1d"].to_numpy(float)[te],
-        "model_used": "v4_tokyo_grand_ensemble(HGB+LGB_PhysicalBlocks+IC_Decoupling+Drift_Correction)",
+        "model_used": "v4_tokyo_grand_ensemble(HGB+Enhanced_LGB_SpreadDrift+IC_Decoupling+Level_Drift)",
         "pred_raw_before_drift": pred_raw,
         "drift_adjust": DRIFT_K * drift_bias,
         "forecast_created_at": datetime.now().astimezone().isoformat(),
