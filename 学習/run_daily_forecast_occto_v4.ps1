@@ -272,7 +272,12 @@ try{
 
   if(!$SkipAreaModel){
 
-   $oka=Step-Opt '6h エリア別の将来特徴量' {Run-Python '6h エリア別の将来特徴量' (Join-Path $Learning 'build_future_area_features.py') @('--mode','fetch','--date',$Day1.ToString('yyyy-MM-dd'))}
+   $oka = $false
+   for ($attempt = 1; $attempt -le 3; $attempt++) {
+     $oka = Step-Opt "6h エリア別の将来特徴量 (試行 $attempt/3)" {Run-Python "6h エリア別の将来特徴量" (Join-Path $Learning 'build_future_area_features.py') @('--mode','fetch','--date',$Day1.ToString('yyyy-MM-dd'))}
+     if ($oka) { break }
+     if ($attempt -lt 3) { Log "WARN 6h エリア別の将来特徴量が失敗しました。30秒後に再試行します ($attempt/3)..." Yellow; Start-Sleep -Seconds 30 }
+   }
 
    if($oka){Step-Opt '6i エリア別DAY1予測(新ブレンド)' {Run-Python '6i エリア別DAY1予測(新ブレンド)' (Join-Path $Learning 'predict_area_day1_recon.py') @('--mode','predict','--date',$Day1.ToString('yyyy-MM-dd'))}}else{Log "WARN エリア別予測を省略(将来の特徴量が作れませんでした)" Yellow}
 
