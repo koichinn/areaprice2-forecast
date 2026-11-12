@@ -2,8 +2,8 @@ name: "JEPX Daily Forecast (AreaPrice2)"
 
 on:
   schedule:
-    # 毎朝 08:47 JST (前日 23:47 UTC) に1回自動実行 (45分の混雑を回避し 09:02 頃に完了)
-    - cron: '47 23 * * *'
+    # 毎朝 08:33 JST (前日 23:33 UTC) に1回自動実行 (08:33開始、08:48頃完了)
+    - cron: '33 23 * * *'
   workflow_dispatch:
 
 permissions:
