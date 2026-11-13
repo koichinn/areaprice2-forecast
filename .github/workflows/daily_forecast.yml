@@ -2,8 +2,8 @@ name: "JEPX Daily Forecast (AreaPrice2)"
 
 on:
   schedule:
-    # 毎朝 08:33 JST (前日 23:33 UTC) に1回自動実行 (08:33開始、08:48頃完了)
-    - cron: '33 23 * * *'
+    # 毎朝 07:00 JST (前日 22:00 UTC) に1回自動実行 (07:00開始、07:15頃完了)
+    - cron: '0 22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -91,7 +91,7 @@ jobs:
           $learnDir = "P:\$([char]0x30A8)$([char]0x30EA)$([char]0x30A2)$([char]0x30D7)$([char]0x30E9)$([char]0x30A4)$([char]0x30B9)2\$([char]0x5B66)$([char]0x7FD2)"
           Set-Location $learnDir
           $ps1Path = Join-Path $learnDir "run_daily_forecast_occto_v4.ps1"
-          powershell -ExecutionPolicy Bypass -File $ps1Path -SkipFreshnessCheck -PastStopDays 30
+          powershell -ExecutionPolicy Bypass -File $ps1Path -SkipFreshnessCheck -SkipSupplyUpdate -SkipTrainingChain -PastStopDays 60 -SkipDashboard
 
       - name: "Send forecast results via Email for Power Automate sync (Optional)"
         if: always()
@@ -114,34 +114,16 @@ jobs:
         shell: pwsh
         run: |
           python -c "
-          import json, re, shutil
+          import shutil
           from pathlib import Path
           src = Path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92')
           dst = Path('.')
-          html_p = src / 'web' / 'forecast_accuracy_dashboard.html'
-          if html_p.is_file() and html_p.stat().st_size > 20 * 1024 * 1024:
-              txt = html_p.read_text(encoding='utf-8')
-              m = re.search(r'const P=(\{.*\}),D=P\.records', txt)
-              if m:
-                  obj = json.loads(m.group(1))
-                  ui_keys = {'target_date','target_datetime','slot','area','area_ja','day','selected_calc_date','selected_run','forecast_created_at','predicted_price_yen_kwh','actual_price_yen_kwh','error','abs_error'}
-                  new_recs = []
-                  for r in obj.get('records', []):
-                      nr = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items() if k in ui_keys and v is not None and v != ''}
-                      new_recs.append(nr)
-                  obj['records'] = new_recs
-                  new_json = json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
-                  txt = txt[:m.start(1)] + new_json + txt[m.end(1):]
-                  html_p.write_text(txt, encoding='utf-8')
-                  print(f'Compacted HTML to {html_p.stat().st_size / (1024*1024):.2f} MB')
           for sub, pat in [('\u4e88\u6e2c', 'forecast_system_day1_occto_latest.csv'),
                            ('\u4e88\u6e2c', 'forecast_area_day1_recon_latest.csv'),
                            ('\u4e88\u6e2c', 'forecast_tokyo_day1_v4_latest.csv'),
                            ('\u4e88\u6e2c', 'tokyo_day1_v4_pred_history.csv'),
                            ('\u4e88\u6e2c', 'forecast_day1_to_day7_latest.csv'),
-                           ('\u4e88\u6e2c', 'system_day1_compare_daily.csv'),
-                           ('web', '*.html'),
-                           ('web', '*.csv')]:
+                           ('\u4e88\u6e2c', 'system_day1_compare_daily.csv')]:
               sdir = src / sub
               ddir = dst / sub
               ddir.mkdir(parents=True, exist_ok=True)
@@ -170,18 +152,6 @@ jobs:
           name: jepx-forecast-outputs
           path: |
             予測/*.csv
-            web/*.html
-            web/*.csv
           retention-days: 30
 
-      - name: "Persist updated master data back to GitHub Release (latest-data)"
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          python -c "import runpy; runpy.run_path('P:/\u30a8\u30ea\u30a2\u30d7\u30e9\u30a4\u30b92/\u5b66\u7fd2/build_cloud_package.py', run_name='__main__')"
-          $zipPath = "P:\$([char]0x30A8)$([char]0x30EA)$([char]0x30A2)$([char]0x30D7)$([char]0x30E9)$([char]0x30A4)$([char]0x30B9)2\cloud_release_bundle.zip"
-          if (Test-Path $zipPath) {
-            gh release upload latest-data $zipPath --repo "${{ github.repository }}" --clobber
-          }
+
