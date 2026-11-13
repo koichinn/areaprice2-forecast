@@ -2,9 +2,11 @@ name: "JEPX Daily Forecast (AreaPrice2)"
 
 on:
   schedule:
-    # 毎朝 07:00 JST (前日 22:00 UTC) に1回自動実行 (07:00開始、07:15頃完了)
+    # 毎朝 07:00 JST (前日 22:00 UTC) に1回自動実行 (cron バックアップ用)
     - cron: '0 22 * * *'
   workflow_dispatch:
+  repository_dispatch:
+    types: [daily_forecast, power_automate_trigger]
 
 permissions:
   contents: write
