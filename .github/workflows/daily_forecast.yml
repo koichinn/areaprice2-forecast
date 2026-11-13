@@ -2,8 +2,11 @@ name: "JEPX Daily Forecast (AreaPrice2)"
 
 on:
   schedule:
-    # 毎朝 07:00 JST (前日 22:00 UTC) に1回自動実行 (cron バックアップ用)
-    - cron: '0 22 * * *'
+    # 毎時00分の世界中集中混雑を避けるため、端数の分(07:03 JST)に第1トリガー
+    # 万が一の混雑遅延に備えて 07:18 / 07:33 にもフォールバック設定 (当日完了済みなら自動スキップ)
+    - cron: '3 22 * * *'   # 07:03 JST (前日 22:03 UTC) - メイントリガー
+    - cron: '18 22 * * *'  # 07:18 JST (前日 22:18 UTC) - フォールバック1
+    - cron: '33 22 * * *'  # 07:33 JST (前日 22:33 UTC) - フォールバック2
   workflow_dispatch:
   repository_dispatch:
     types: [daily_forecast, power_automate_trigger]
@@ -23,7 +26,7 @@ jobs:
       - name: "Checkout repository"
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 5
 
       - name: "Set up Python 3.12"
         uses: actions/setup-python@v5
@@ -90,6 +93,18 @@ jobs:
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          tzutil /s "Tokyo Standard Time"
+          $today = (Get-Date).ToString("yyyy-MM-dd")
+
+          # スケジュール実行時、今日すでに実行完了している場合は安全にスキップ
+          if ("${{ github.event_name }}" -eq "schedule") {
+            $recent = git log -n 5 --pretty=%s
+            if ($recent -match "Auto-update JEPX forecast \($today") {
+              Write-Host "=== Today ($today JST) forecast has already been completed. Skipping. ==="
+              exit 0
+            }
+          }
+
           $learnDir = "P:\$([char]0x30A8)$([char]0x30EA)$([char]0x30A2)$([char]0x30D7)$([char]0x30E9)$([char]0x30A4)$([char]0x30B9)2\$([char]0x5B66)$([char]0x7FD2)"
           Set-Location $learnDir
           $ps1Path = Join-Path $learnDir "run_daily_forecast_occto_v4.ps1"
