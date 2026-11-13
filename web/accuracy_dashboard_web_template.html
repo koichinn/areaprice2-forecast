@@ -3,18 +3,26 @@
 .sub-controls{display:flex;gap:4px;background:#1a3154;padding:3px 5px;border-radius:8px;border:1px solid #3b82f6}
 .sub-controls button{padding:5px 9px;font-size:12px;border:none;background:transparent;color:#93c5fd;border-radius:5px;cursor:pointer}
 .sub-controls button.on{background:#2563eb;color:#fff;font-weight:bold}
-.legend-all{display:flex;flex-wrap:wrap;gap:12px;margin:8px 0 12px;font-size:12px;align-items:center}
-.legend-item{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
-.legend-line{width:18px;height:3px;border-radius:2px}
 </style></head><body>
 <header><div><div class="sub">JEPX FORECAST ACCURACY</div><h1>予測・実績 比較ダッシュボード</h1><div class="sub">対象日ごとに最新の計算日を採用／実績のみでも表示</div></div><div class="controls"><label>最終日 <input id="endDate" type="date"></label><button data-days="1">1日</button><button data-days="7" class="on">7日</button><button data-days="30">1か月</button><span id="modeWrap" class="sub-controls" style="display:none"><button id="btnSingle" class="on">個別エリア</button><button id="btnAll">全エリア一斉</button></span><select id="area"></select><select id="day"><option value="all">全DAY</option></select><button onclick="location.reload()">最新データに更新</button></div></header>
-<main><div id="status" class="status"></div><div id="runs" class="card"></div><div id="kpis" class="kpis" style="margin-top:12px"></div><section class="grid"><article class="card wide"><h2 id="mainChartTitle">予測・実績</h2><div id="legendBox" class="legend-all" style="display:none"></div><canvas id="mainChart"></canvas></article><article class="card"><h2 id="chart2Title">日別 MAE</h2><canvas id="maeChart"></canvas></article><article class="card"><h2 id="chart3Title">日別 Bias</h2><canvas id="biasChart"></canvas></article><article class="card wide"><h2 id="tableTitle">比較詳細</h2><div class="tablewrap"><table id="detailTable"><thead><tr id="theadRow"><th>対象日時</th><th>エリア</th><th>DAY</th><th>採用計算日</th><th>予測計算日時</th><th>予測</th><th>実績</th><th>誤差</th><th>絶対誤差</th></tr></thead><tbody id="body"></tbody></table></div></article></section></main><script>const P=__PAYLOAD__,D=P.records,$=s=>document.querySelector(s);let days=7;let isAllAreasMode=false;
+<main><div id="status" class="status"></div><div id="runs" class="card"></div><div id="kpis" class="kpis" style="margin-top:12px"></div><section class="grid"><article class="card wide"><h2 id="mainChartTitle">予測・実績</h2><canvas id="mainChart"></canvas></article><article class="card"><h2 id="chart2Title">日別 MAE</h2><canvas id="maeChart"></canvas></article><article class="card"><h2 id="chart3Title">日別 Bias</h2><canvas id="biasChart"></canvas></article><article class="card wide"><h2 id="tableTitle">比較詳細</h2><div class="tablewrap"><table id="detailTable"><thead><tr id="theadRow"><th>対象日時</th><th>エリア</th><th>DAY</th><th>採用計算日</th><th>予測計算日時</th><th>予測</th><th>実績</th><th>誤差</th><th>絶対誤差</th></tr></thead><tbody id="body"></tbody></table></div></article></section></main><script>const P=__PAYLOAD__,D=P.records,$=s=>document.querySelector(s);let days=7;let isAllAreasMode=false;
 
 // 1. エリア順序の定義 (システム先頭、北海道から九州へ)
 const AREA_ORDER = ['system', 'hokkaido', 'tohoku', 'tokyo', 'chubu', 'hokuriku', 'kansai', 'chugoku', 'shikoku', 'kyushu'];
-const AREA_NAMES = {'system':'システム','hokkaido':'北海道','tohoku':'東北','tokyo':'東京','chubu':'中部','hokuriku':'北陸','kansai':'関西','chugoku':'中国','shikoku':'四国','kyushu':'九州'};
+const AREA_NAMES = {
+  'system': 'システム',
+  'hokkaido': '北海道',
+  'tohoku': '東北',
+  'tokyo': '東京',
+  'chubu': '中部',
+  'hokuriku': '北陸',
+  'kansai': '関西',
+  'chugoku': '中国',
+  'shikoku': '四国',
+  'kyushu': '九州'
+};
 const AREA_COLORS = {
-  'system': '#0f172a',
+  'system': '#1e293b',
   'hokkaido': '#0284c7',
   'tohoku': '#0d9488',
   'tokyo': '#e11d48',
@@ -31,6 +39,7 @@ const sortedAreaKeys = AREA_ORDER.filter(a=>availableAreaKeys.has(a));
 D.forEach(x=>{ if(x.area && !sortedAreaKeys.includes(x.area)) sortedAreaKeys.push(x.area); });
 
 function buildAreaSelect(){
+  let currentVal = area.value;
   let opts = [];
   if (days === 1) {
     opts.push('<option value="all_areas">★ 全エリア一斉表示</option>');
@@ -41,8 +50,10 @@ function buildAreaSelect(){
   area.innerHTML = opts.join('');
   if (isAllAreasMode && days === 1) {
     area.value = 'all_areas';
-  } else if (!area.value || area.value === 'all_areas') {
-    area.value = 'system';
+  } else if (currentVal && currentVal !== 'all_areas' && sortedAreaKeys.includes(currentVal)) {
+    area.value = currentVal;
+  } else {
+    area.value = sortedAreaKeys[0] || 'system';
   }
 }
 buildAreaSelect();
@@ -67,7 +78,15 @@ function rows(){
       return dateOk && dayOk;
     }
     return x.area == area.value && dayOk && dateOk;
-  }).sort((a,b) => (a.target_datetime || a.target_date).localeCompare(b.target_datetime || b.target_date) || ((a.slot||0)-(b.slot||0)));
+  }).sort((a,b) => {
+    if (isAllAreasMode && days === 1) {
+      let aIdx = sortedAreaKeys.indexOf(a.area);
+      let bIdx = sortedAreaKeys.indexOf(b.area);
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      return (a.slot||0) - (b.slot||0);
+    }
+    return (a.target_datetime || a.target_date).localeCompare(b.target_datetime || b.target_date) || ((a.slot||0)-(b.slot||0));
+  });
 }
 
 function met(a){
@@ -106,7 +125,9 @@ function drawBar(id,v,lab,col){
       c.fillStyle='#111827';c.font=(bw<30?'9px':'11px')+' Segoe UI';c.fillText(q.toFixed(2),cx,q>=0?y-4:y+12);
     }
     c.font='11px Segoe UI';c.fillStyle='#64748b';
-    if(i%step==0)c.fillText(String(lab[i]).slice(5)||lab[i],cx,h-p.b+16);
+    let displayLab = String(lab[i]).trim();
+    if(displayLab.length > 5 && displayLab.includes('-')) displayLab = displayLab.slice(5);
+    if(i%step==0)c.fillText(displayLab,cx,h-p.b+16);
   });
   c.textAlign='left';
 }
@@ -125,21 +146,37 @@ function draw(id,series){
     let y=p.t+j*(h-p.t-p.b)/5,v=mx-j*(mx-mn)/5;
     c.beginPath();c.moveTo(p.l,y);c.lineTo(w-p.r,y);c.stroke();c.fillText(v.toFixed(2),6,y+4);
   }
-  // hour grid
+  // hour grid (12:00)
   if(window.__chartRows&&window.__chartRows.length===maxLen){
     let R=window.__chartRows;c.save();c.strokeStyle='#cbd5e1';c.lineWidth=1;c.setLineDash([2,4]);
     R.forEach((x,i)=>{
       let t=String(x.target_datetime||'');
-      if(/(\s|T)(06|12|18):00/.test(t)){
+      if(/(\s|T)(12):00/.test(t)){
         let xx=X(i);c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
-        c.fillText(t.slice(11,16),xx-12,h-p.b+14);
+        c.fillText('12:00',xx-12,h-p.b+14);
       }
     });
     c.setLineDash([]);c.restore();
   }
+  // zero line
   if(mn<0&&mx>0){c.strokeStyle='#94a3b8';c.setLineDash([5,4]);c.beginPath();c.moveTo(p.l,Y(0));c.lineTo(w-p.r,Y(0));c.stroke();c.setLineDash([]);}
+  // midnight lines (for multi-day mode)
+  if(!isAllAreasMode && window.__chartRows && window.__chartRows.length === maxLen){
+    let R=window.__chartRows;c.save();c.strokeStyle='#475569';c.fillStyle='#334155';c.lineWidth=1.2;c.setLineDash([]);c.font='11px Segoe UI';
+    R.forEach((x,i)=>{
+      let t=String(x.target_datetime||'');
+      let mid=/[ T]00:00/.test(t)||(!x.target_datetime&&x.slot==1);
+      if(mid){
+        let xx=X(i);c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
+        c.fillText(String(x.target_date||t.slice(0,10)).slice(5),xx+3,p.t+11);
+      }
+    });
+    c.restore();
+  }
+  // draw lines: 予測と実績の線の太さを同じ (2px) に統一
   series.forEach(s=>{
-    c.strokeStyle=s.c;c.lineWidth=s.w||(s.name==='実績'?3:2);
+    c.strokeStyle=s.c;
+    c.lineWidth=s.w||2;
     if(s.dash)c.setLineDash(s.dash);else c.setLineDash([]);
     c.beginPath();let pen=false;
     s.v.forEach((v,i)=>{
@@ -151,11 +188,39 @@ function draw(id,series){
 }
 
 function shadeRuns(id,r){
-  if(isAllAreasMode && days === 1) return; // 全エリア表示時は背景色分けスキップ
   let cv=$('#'+id),c=cv.getContext('2d'),w=cv.clientWidth||800,h=cv.clientHeight||340;
   if(!r.length)return;
   let p={l:64,r:18,t:22,b:50},n=r.length;
   let X=i=>p.l+i*(w-p.l-p.r)/Math.max(1,n-1);
+
+  if(isAllAreasMode && days === 1){
+    // 全エリア一斉表示モード: 7日間表示のようにエリアごとに背景色と境界線・ラベルを表示
+    let groups=[];let start=0;let current=r[0].area;
+    for(let i=1;i<=n;i++){
+      let next=i<n?r[i].area:null;
+      if(i===n || next!==current){
+        groups.push({start:start,end:i-1,area:current});
+        start=i;current=next;
+      }
+    }
+    c.save();
+    groups.forEach((g,k)=>{
+      let color=AREA_COLORS[g.area]||'#2563eb';
+      let x1=X(g.start), x2=X(g.end);
+      if(g.start>0) x1=(X(g.start-1)+X(g.start))/2;
+      if(g.end<n-1) x2=(X(g.end)+X(g.end+1))/2;
+      c.fillStyle=color+'18';c.fillRect(x1,p.t,Math.max(1,x2-x1),h-p.t-p.b);
+      c.strokeStyle=color;c.lineWidth=1.5;c.setLineDash([4,4]);c.beginPath();c.moveTo(x1,p.t);c.lineTo(x1,h-p.b);c.stroke();c.setLineDash([]);
+      let label=AREA_NAMES[g.area]||g.area;
+      c.font='bold 13px Segoe UI';c.fillStyle=color;
+      let tw=c.measureText(label).width;let tx=Math.min(Math.max(x1+8,p.l),w-p.r-tw);
+      c.fillText(label,tx,16);
+    });
+    c.restore();
+    return;
+  }
+
+  // 個別エリアモード: 採用計算日ごとに背景色分け
   let colors=['#2563eb','#059669','#dc2626','#7c3aed','#ea580c','#0891b2','#c026d3','#65a30d'];
   let groups=[];let start=0;let current=(r[0].selected_run||r[0].selected_calc_date)||'';
   for(let i=1;i<=n;i++){
@@ -183,7 +248,6 @@ function shadeRuns(id,r){
 }
 
 function render(){
-  // 1日表示時のトグルUI制御
   if (days === 1) {
     $('#modeWrap').style.display = 'inline-flex';
     $('#btnSingle').classList.toggle('on', !isAllAreasMode);
@@ -204,14 +268,13 @@ function render(){
 }
 
 function renderSingleArea(r, m){
-  $('#legendBox').style.display = 'none';
-  $('#mainChartTitle').innerHTML = '予測・実績 <span style="font-size:13px;font-weight:600;margin-left:18px;color:#334155"><span style="display:inline-block;width:22px;height:3px;background:#2468d4;vertical-align:middle;margin-right:5px"></span>予測<span style="display:inline-block;width:22px;height:3px;background:#111827;vertical-align:middle;margin:0 5px 0 16px"></span>実績</span>';
+  $('#mainChartTitle').innerHTML = '予測・実績 <span style="font-size:13px;font-weight:600;margin-left:18px;color:#334155"><span style="display:inline-block;width:22px;height:2px;background:#2468d4;vertical-align:middle;margin-right:5px"></span>予測<span style="display:inline-block;width:22px;height:2px;background:#111827;vertical-align:middle;margin:0 5px 0 16px"></span>実績</span>';
   $('#chart2Title').textContent = '日別 MAE';
   $('#chart3Title').textContent = '日別 Bias';
   $('#tableTitle').textContent = '比較詳細';
 
   window.__chartRows = r;
-  status.textContent = `市場確定日: ${P.marketConfirmedThrough} | 選択最終日: ${endDate.value} | 期間: ${days}日 | エリア: ${AREA_NAMES[area.value]||area.value} | 表示: ${r.length}コマ | 精度比較: ${m.n||0}コマ`;
+  status.textContent = `市場確定: ${P.marketConfirmedThrough} | 選択最終日: ${endDate.value} | 期間: ${days}日 | エリア: ${AREA_NAMES[area.value]||area.value} | 表示: ${r.length}コマ | 精度比較: ${m.n||0}コマ`;
   
   let by = {};
   r.forEach(x => { if(x.target_date && !by[x.target_date]) by[x.target_date] = (x.selected_run||x.selected_calc_date)||'実績のみ'; });
@@ -225,7 +288,7 @@ function renderSingleArea(r, m){
 
   draw('mainChart', [
     { name:'予測', v:r.map(x=>x.predicted_price_yen_kwh), c:'#2468d4', w:2 },
-    { name:'実績', v:r.map(x=>x.actual_price_yen_kwh), c:'#111827', w:3 }
+    { name:'実績', v:r.map(x=>x.actual_price_yen_kwh), c:'#111827', w:2 }
   ]);
   shadeRuns('mainChart', r);
 
@@ -236,16 +299,18 @@ function renderSingleArea(r, m){
   drawBar('biasChart', dm.map(x=>x.bias), Object.keys(g), '#2468d4');
 
   theadRow.innerHTML = '<th>対象日時</th><th>エリア</th><th>DAY</th><th>採用計算日</th><th>予測計算日時</th><th>予測</th><th>実績</th><th>誤差</th><th>絶対誤差</th>';
-  body.innerHTML = r.slice().reverse().map(x => `<tr><td>${x.target_datetime||x.target_date+' #'+x.slot}</td><td>${x.area_ja||x.area}</td><td>${x.day??'-'}</td><td>${(x.selected_run||x.selected_calc_date)||'実績のみ'}</td><td>${x.forecast_created_at||'-'}</td><td>${f(x.predicted_price_yen_kwh)}</td><td>${f(x.actual_price_yen_kwh)}</td><td>${f(x.error)}</td><td>${f(x.abs_error)}</td></tr>`).join('');
+  body.innerHTML = r.slice().reverse().map(x => `<tr><td>${x.target_datetime||x.target_date+' #'+x.slot}</td><td>${AREA_NAMES[x.area]||x.area_ja||x.area}</td><td>${x.day??'-'}</td><td>${(x.selected_run||x.selected_calc_date)||'実績のみ'}</td><td>${x.forecast_created_at||'-'}</td><td>${f(x.predicted_price_yen_kwh)}</td><td>${f(x.actual_price_yen_kwh)}</td><td>${f(x.error)}</td><td>${f(x.abs_error)}</td></tr>`).join('');
 }
 
 function renderAllAreas(r){
-  // 1日・全エリア一斉表示
-  status.textContent = `市場確定日: ${P.marketConfirmedThrough} | 対象日: ${endDate.value} (1日全エリア一斉表示) | 表示コマ: ${r.length} コマ (10エリア × 48コマ)`;
+  // 1日・全エリア一斉表示モード (7日間表示のようにエリアごとに横に並べる)
+  $('#mainChartTitle').innerHTML = `全エリア 予測・実績 一斉比較 (${endDate.value}) <span style="font-size:13px;font-weight:600;margin-left:18px;color:#334155"><span style="display:inline-block;width:22px;height:2px;background:#2468d4;vertical-align:middle;margin-right:5px"></span>予測<span style="display:inline-block;width:22px;height:2px;background:#111827;vertical-align:middle;margin:0 5px 0 16px"></span>実績</span>`;
+  
+  status.textContent = `市場確定: ${P.marketConfirmedThrough} | 対象日: ${endDate.value} (1日全エリア一斉表示) | 表示: ${r.length} コマ (10エリア × 48コマ)`;
   
   let by = {};
   r.forEach(x => { if(x.area && !by[x.area]) by[x.area] = (x.selected_run||x.selected_calc_date)||'実績のみ'; });
-  runs.innerHTML = '<b>エリア別 採用計算日</b>' + sortedAreaKeys.map(a => `<div>${AREA_NAMES[a]||a} → ${by[a]||'-'}</div>`).join('');
+  runs.innerHTML = '<b>エリアごとの採用計算日</b>' + sortedAreaKeys.map(a => `<div>${AREA_NAMES[a]||a} → ${by[a]||'-'}</div>`).join('');
 
   let m = met(r);
   let areaMetrics = sortedAreaKeys.map(a => {
@@ -255,58 +320,49 @@ function renderAllAreas(r){
   });
 
   kpis.innerHTML = [
-    ['全エリア平均 MAE', f(m.mae)], ['全エリア平均 Bias', f(m.bias)],
+    ['全エリア MAE', f(m.mae)], ['全エリア Bias', f(m.bias)],
     ['最小 MAE エリア', areaMetrics.filter(x=>ok(x.mae)).sort((a,b)=>a.mae-b.mae)[0]?.name || '-'],
     ['最大 MAE エリア', areaMetrics.filter(x=>ok(x.mae)).sort((a,b)=>b.mae-a.mae)[0]?.name || '-'],
     ['比較コマ数', f(m.n, 0)], ['対象エリア数', f(sortedAreaKeys.length, 0)]
   ].map(x => `<div class="card kpi"><span>${x[0]}</span><strong>${x[1]}</strong></div>`).join('');
 
-  $('#mainChartTitle').textContent = `全エリア 予測価格 一斉比較 (${endDate.value})`;
-  $('#legendBox').style.display = 'flex';
-  $('#legendBox').innerHTML = sortedAreaKeys.map(a => `<span class="legend-item"><span class="legend-line" style="background:${AREA_COLORS[a]};height:${a==='system'?'4px':'3px'}"></span><strong>${AREA_NAMES[a]}</strong></span>`).join('');
+  // 10エリア順に横に並べる。エリア境界で線が飛ばないよう NaN を挟む
+  let predVals = [];
+  let actVals = [];
+  let alignedRows = [];
 
-  // 48コマの時刻スライス
-  let slots = [...new Set(r.map(x=>x.slot))].sort((a,b)=>a-b);
-  let sampleAreaRows = r.filter(x => x.area === 'system');
-  if(!sampleAreaRows.length) sampleAreaRows = r.filter(x => x.area === sortedAreaKeys[0]);
-  window.__chartRows = sampleAreaRows;
-
-  // 全エリアの予測曲線を生成
-  let series = sortedAreaKeys.map(a => {
+  sortedAreaKeys.forEach((a, aIdx) => {
     let sub = r.filter(x => x.area === a).sort((p,q)=>(p.slot||0)-(q.slot||0));
-    return {
-      name: AREA_NAMES[a] || a,
-      v: sub.map(x => x.predicted_price_yen_kwh),
-      c: AREA_COLORS[a] || '#64748b',
-      w: a === 'system' ? 3.5 : (a === 'tokyo' || a === 'kansai' || a === 'kyushu' ? 2.5 : 1.8)
-    };
+    sub.forEach((x) => {
+      predVals.push(x.predicted_price_yen_kwh);
+      actVals.push(x.actual_price_yen_kwh);
+      alignedRows.push(x);
+    });
+    // エリア間に null/NaN を挟んで線を自然に切断
+    if (aIdx < sortedAreaKeys.length - 1) {
+      predVals.push(NaN);
+      actVals.push(NaN);
+      alignedRows.push({ target_datetime: '', area: a, slot: 99 });
+    }
   });
-  draw('mainChart', series);
 
-  // エリア別 MAE / Bias バーチャート
+  window.__chartRows = alignedRows;
+
+  // 予測・実績線 (共に 2px)
+  draw('mainChart', [
+    { name:'予測', v:predVals, c:'#2468d4', w:2 },
+    { name:'実績', v:actVals, c:'#111827', w:2 }
+  ]);
+  shadeRuns('mainChart', alignedRows);
+
+  // エリア別 MAE / Bias バーチャート (システム〜九州 10エリア)
   $('#chart2Title').textContent = 'エリア別 MAE (円/kWh)';
   $('#chart3Title').textContent = 'エリア別 Bias (円/kWh)';
-  drawBar('maeChart', areaMetrics.map(x=>x.mae), sortedAreaKeys.map(a=>'     '+AREA_NAMES[a]), (i,a)=>AREA_COLORS[sortedAreaKeys[i]]||'#d34a44');
-  drawBar('biasChart', areaMetrics.map(x=>x.bias), sortedAreaKeys.map(a=>'     '+AREA_NAMES[a]), (i,a)=>AREA_COLORS[sortedAreaKeys[i]]||'#2468d4');
+  drawBar('maeChart', areaMetrics.map(x=>x.mae), sortedAreaKeys.map(a=>AREA_NAMES[a]||a), (i)=>AREA_COLORS[sortedAreaKeys[i]]||'#d34a44');
+  drawBar('biasChart', areaMetrics.map(x=>x.bias), sortedAreaKeys.map(a=>AREA_NAMES[a]||a), (i)=>AREA_COLORS[sortedAreaKeys[i]]||'#2468d4');
 
-  // 横並びマトリクステーブル: コマ(時刻) × 10エリア
-  theadRow.innerHTML = '<th>コマ</th><th>対象時刻</th>' + sortedAreaKeys.map(a => `<th>${AREA_NAMES[a]}<br><span style="font-weight:normal;font-size:10px">予測 (実績)</span></th>`).join('');
-  
-  let tableRows = [];
-  slots.forEach(sl => {
-    let slRows = r.filter(x => x.slot === sl);
-    let sample = slRows[0] || {};
-    let tStr = sample.target_datetime ? sample.target_datetime.slice(11,16) : `#${sl}`;
-    let tds = sortedAreaKeys.map(a => {
-      let match = slRows.find(x => x.area === a);
-      if(!match) return '<td>-</td>';
-      let pred = f(match.predicted_price_yen_kwh);
-      let act = ok(match.actual_price_yen_kwh) ? ` (${f(match.actual_price_yen_kwh)})` : '';
-      return `<td><strong>${pred}</strong><span style="color:#64748b;font-size:11px">${act}</span></td>`;
-    }).join('');
-    tableRows.push(`<tr><td>#${sl}</td><td>${tStr}</td>${tds}</tr>`);
-  });
-  body.innerHTML = tableRows.join('');
+  theadRow.innerHTML = '<th>対象日時</th><th>エリア</th><th>DAY</th><th>採用計算日</th><th>予測計算日時</th><th>予測</th><th>実績</th><th>誤差</th><th>絶対誤差</th>';
+  body.innerHTML = r.slice().reverse().map(x => `<tr><td>${x.target_datetime||x.target_date+' #'+x.slot}</td><td>${AREA_NAMES[x.area]||x.area_ja||x.area}</td><td>${x.day??'-'}</td><td>${(x.selected_run||x.selected_calc_date)||'実績のみ'}</td><td>${x.forecast_created_at||'-'}</td><td>${f(x.predicted_price_yen_kwh)}</td><td>${f(x.actual_price_yen_kwh)}</td><td>${f(x.error)}</td><td>${f(x.abs_error)}</td></tr>`).join('');
 }
 
 // イベントリスナー
