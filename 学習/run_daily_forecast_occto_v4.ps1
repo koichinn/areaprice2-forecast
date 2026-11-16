@@ -1,8 +1,8 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 
 [CmdletBinding()]
 
-param([switch]$SkipFreshnessCheck,[switch]$SkipSupplyUpdate,[int]$OcctoRetryCount=3,[int]$OcctoRetrySeconds=45,[int]$SupplyStaleLimitDays=30,[int]$PastStopDays=7,[switch]$ForceTrainingChain,[switch]$SkipSystemModel,[switch]$SkipSystemReplace,[switch]$SkipAreaModel,[switch]$ApplyAreaReplace,[switch]$SkipAreaReplace)
+param([switch]$SkipFreshnessCheck,[switch]$SkipSupplyUpdate,[switch]$SkipTrainingChain,[int]$OcctoRetryCount=3,[int]$OcctoRetrySeconds=45,[int]$SupplyStaleLimitDays=30,[int]$PastStopDays=7,[switch]$ForceTrainingChain,[switch]$SkipSystemModel,[switch]$SkipSystemReplace,[switch]$SkipAreaModel,[switch]$ApplyAreaReplace,[switch]$SkipAreaReplace,[switch]$SkipDashboard)
 
 $ErrorActionPreference="Stop"
 
@@ -242,7 +242,7 @@ try{
 
   $markVal=if(Test-Path $chainMark){(Get-Content $chainMark -Encoding ASCII|Select-Object -First 1)}else{''}
 
-  if($ForceTrainingChain -or $markVal -ne $todayStr){
+  if(!$SkipTrainingChain -and ($ForceTrainingChain -or $markVal -ne $todayStr)){
 
    if(Step-Opt '6a 学習チェーン再作成' {Run-Python '6a 学習チェーン再作成' (Join-Path $Learning 'rebuild_training_chain_v8.py')}){
 
@@ -291,7 +291,11 @@ try{
 
  }
 
- try{Run-Python '7 精度履歴更新' 'P:\エリアプライス2\web\update_day1_to_day7_accuracy_history_web.py';Run-Python '8 精度ダッシュボード生成' 'P:\エリアプライス2\web\build_accuracy_dashboard_web.py'}catch{Log "WARN ダッシュボード更新失敗: $($_.Exception.Message)" Yellow}
+ if(!$SkipDashboard){
+   try{Run-Python '7 精度履歴更新' 'P:\エリアプライス2\web\update_day1_to_day7_accuracy_history_web.py';Run-Python '8 精度ダッシュボード生成' 'P:\エリアプライス2\web\build_accuracy_dashboard_web.py'}catch{Log "WARN ダッシュボード更新失敗: $($_.Exception.Message)" Yellow}
+ }else{
+   Log "ダッシュボード生成をスキップ(-SkipDashboard)" Cyan
+ }
 
  if($script:Warns.Count -gt 0){$w=@($script:Warns|Select-Object -Unique);Log "`n=== 警告まとめ（$($w.Count)件） ===" Cyan;$w|ForEach-Object{Add-Content $Log "  $_" -Encoding UTF8;Write-Host "  $_" -ForegroundColor Yellow}}
 
