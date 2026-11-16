@@ -99,6 +99,15 @@ def main():
     nm = new.index.max()
 
     if old is not None:
+        o_prev = old.assign(target_datetime=pd.to_datetime(old["target_datetime"])).set_index("target_datetime")
+        o_prev.index.name = "dt"
+        o_prev_clean = o_prev.rename(columns=lambda c: c[len("pre1100_occto_"):] if c.startswith("pre1100_occto_") else c)
+        if len(new) < len(old) * 0.99:
+            print(f"   INFO 差分月次データ({len(new):,}行)を既存履歴({len(old):,}行)とマージします")
+            common_cols = [c for c in new.columns if c in o_prev_clean.columns]
+            older_rows = o_prev_clean.loc[~o_prev_clean.index.isin(new.index), common_cols]
+            new = pd.concat([older_rows, new[common_cols]]).sort_index()
+            nm = new.index.max()
 
         if nm < om: print(f"ERROR 最終日が後退します({nm} < {om})。置き換えません"); return 1
 
