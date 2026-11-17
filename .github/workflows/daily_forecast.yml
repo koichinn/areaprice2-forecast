@@ -1,12 +1,6 @@
 name: "JEPX Daily Forecast (AreaPrice2)"
 
 on:
-  schedule:
-    # 毎時00分の世界中集中混雑を避けるため、端数の分(07:03 JST)に第1トリガー
-    # 万が一の混雑遅延に備えて 07:18 / 07:33 にもフォールバック設定 (当日完了済みなら自動スキップ)
-    - cron: '3 22 * * *'   # 07:03 JST (前日 22:03 UTC) - メイントリガー
-    - cron: '18 22 * * *'  # 07:18 JST (前日 22:18 UTC) - フォールバック1
-    - cron: '33 22 * * *'  # 07:33 JST (前日 22:33 UTC) - フォールバック2
   workflow_dispatch:
   repository_dispatch:
     types: [daily_forecast, power_automate_trigger]
