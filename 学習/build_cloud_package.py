@@ -14,9 +14,9 @@ from pathlib import Path
 ROOT = Path(r"P:\エリアプライス2")
 OUT_ZIP = ROOT / "cloud_release_bundle.zip"
 
-# 1. コード・設定ファイルとして含めるディレクトリと拡張子
-CODE_DIRS = ["学習", "web", "database", "予測", "仕様", ".github"]
-CODE_EXTS = {".py", ".ps1", ".json", ".yml", ".yaml", ".html", ".md", ".txt"}
+# 1. コード・設定ファイルとして含めるディレクトリと拡張子 (web/ダッシュボードは除外)
+CODE_DIRS = ["学習", "database", "予測", "仕様", "models", ".github"]
+CODE_EXTS = {".py", ".ps1", ".json", ".yml", ".yaml", ".md", ".txt", ".joblib"}
 
 # 除外するサブフォルダ名（巨大な過去バックアップや一時キャッシュ）
 EXCLUDE_DIR_NAMES = {
@@ -26,56 +26,43 @@ EXCLUDE_DIR_NAMES = {
     "logs",
     ".git",
     "cloud_upload_repo",
+    "old",
 }
 
-# 2. データファイル（.csv / .parquet）として明示的に含める必須ファイル・パターン
+# 2. 予測実行に真に必要な最小データファイルのみに厳選（GBデータを全廃）
 ESSENTIAL_DATA_GLOBS = [
-    # 送配電9社データ
+    # 事前学習済み軽量モデル (最重要: 全9エリアのビット完全一致推論用)
+    "models/*.joblib",
+    # 送配電9社マスター (parquet版 9MBのみ。85MBの巨大CSVは除外)
     "database/送配電９社データ/source_registry_v4_2.json",
     "database/送配電９社データ/update_area_supply_master_report.json",
     "database/送配電９社データ/raw_9area/area_supply_master_v2.parquet",
-    "database/送配電９社データ/raw_9area/area_supply_master_v2.csv",
-    "database/送配電９社データ/raw_9area/*2026*.csv",
-    # JEPXデータ
+    # JEPXデータ (直近およびマスター 8MB)
     "database/JPEXデータ/data/jepx_spot_summary_master.csv",
     "database/JPEXデータ/data/spot_summary_2026.csv",
-    "database/JPEXデータ/data/spot_summary_2025.csv",
-    # 天気9エリア
-    "database/天気9エリア/data/*.csv",
-    "database/天気9エリア/data/*.parquet",
+    # 天気9エリア (直近データのみ)
     "database/天気9エリア/*.parquet",
     "database/天気9エリア/*.csv",
-    "database/天気9エリア/forecast_history/*.parquet",
-    "database/天気9エリア/forecast_history/*.csv",
-    # OCCTOデータ (特徴量parquetと直近ダウンロードCSV)
-    "database/occtoデータ/features/*.parquet",
-    # 発電所停止データ (Outages)
-    "database/outages_features_day1.parquet",
-    "database/outages_*.csv",
-    # 統合データ (日次パイプラインが読み書きするコアファイル)
+    # 統合データ (推論用将来特徴量と直近過去データのみ)
     "database/統合データ/past_integrated_9area_30min.parquet",
     "database/統合データ/future_integrated_9area_30min.parquet",
     "database/統合データ/future_weather_features_system_day1.parquet",
     "database/統合データ/future_price_features_system_day1.parquet",
     "database/統合データ/future_area_day1_area.parquet",
     "database/統合データ/future_area_day1_premium.parquet",
-    "database/統合データ/weather_archive/*.parquet",
+    # システムDAY1・東京DAY1推論が参照する最新学習テーブル (計約134MB)
     "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_system_natwf_day1.parquet",
-    "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_area_day1.parquet",
-    "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_day2_to_day7.parquet",
-    "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_*_day1.parquet",
-    "database/統合データ/training_v8_price_regime/jepx_training_v8_*_premium_day1.parquet",
-    # 学習フォルダ内の必須データ
+    "database/統合データ/training_v8_price_regime/jepx_training_v8_price_regime_tokyo_day1.parquet",
+    "database/統合データ/training_v8_price_regime/jepx_training_v8_tokyo_premium_day1.parquet",
+    # 学習フォルダ内の校正パラメータとアンカー補助データ
     "学習/evaluation_system_day1_levers_da/occto_da8.parquet",
     "学習/evaluation_system_day1_levers_da/occto_area_ic_da.parquet",
     "学習/system_day1_v3_calib.json",
     "学習/tokyo_day1_v4_calib.json",
-    # 予測・web出力の最新CSV
+    # 予測出力の最新CSV
     "予測/*latest*.csv",
     "予測/tokyo_day1_v4_pred_history.csv",
     "予測/*compare*.csv",
-    "web/*.csv",
-    "web/*.html",
 ]
 
 
