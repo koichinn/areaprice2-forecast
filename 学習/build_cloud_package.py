@@ -40,9 +40,12 @@ ESSENTIAL_DATA_GLOBS = [
     # JEPXデータ (直近およびマスター 8MB)
     "database/JPEXデータ/data/jepx_spot_summary_master.csv",
     "database/JPEXデータ/data/spot_summary_2026.csv",
-    # 天気9エリア (直近データのみ)
+    # 天気9エリア (直近データ + 過去統合用履歴)
     "database/天気9エリア/*.parquet",
     "database/天気9エリア/*.csv",
+    "database/天気9エリア/data/weather_history_9area_30min.csv",
+    # OCCTO pre1100特徴量 (過去統合再生成用)
+    "database/occtoデータ/features/occto_features_pre1100_dayahead.parquet",
     # 統合データ (推論用将来特徴量と直近過去データのみ)
     "database/統合データ/past_integrated_9area_30min.parquet",
     "database/統合データ/future_integrated_9area_30min.parquet",
