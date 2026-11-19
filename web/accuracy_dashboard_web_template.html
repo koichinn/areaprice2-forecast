@@ -108,7 +108,13 @@ function drawBar(id,v,lab,col){
   let vs=v.filter(ok);if(!vs.length){c.fillStyle='#66758a';c.fillText('表示対象データなし',20,30);return;}
   let mn=Math.min(0,...vs),mx=Math.max(0,...vs),pad=(mx-mn||1)*.12,p={l:64,r:18,t:22,b:50};
   if(mn<0)mn-=pad;if(mx>0)mx+=pad;
-  let Y=q=>p.t+(mx-q)*(h-p.t-p.b)/(mx-mn),n=v.length,bw=(w-p.l-p.r)/n,step=bw>=34?1:Math.ceil(34/bw);
+  let Y=q=>p.t+(mx-q)*(h-p.t-p.b)/(mx-mn),n=v.length,bw=(w-p.l-p.r)/n;
+  let maxLabels=Math.max(2,Math.floor((w-p.l-p.r)/44));
+  let step=1;
+  if(n>maxLabels){
+    let raw=n/maxLabels;
+    step=[1,2,3,5,7,10,14,15,30].find(s=>s>=raw)||Math.ceil(raw);
+  }
   c.font='11px Segoe UI';c.lineWidth=1;
   for(let j=0;j<=5;j++){
     let y=p.t+j*(h-p.t-p.b)/5,q=mx-j*(mx-mn)/5;
@@ -116,6 +122,7 @@ function drawBar(id,v,lab,col){
     c.fillStyle='#64748b';c.fillText(q.toFixed(2),6,y+4);
   }
   let y0=Y(0);c.strokeStyle='#94a3b8';c.beginPath();c.moveTo(p.l,y0);c.lineTo(w-p.r,y0);c.stroke();
+  c.strokeStyle='#cbd5e1';c.beginPath();c.moveTo(p.l,h-p.b);c.lineTo(w-p.r,h-p.b);c.stroke();
   c.textAlign='center';
   v.forEach((q,i)=>{
     let cx=p.l+bw*(i+.5),bwi=Math.max(2,bw*.7);
@@ -127,7 +134,10 @@ function drawBar(id,v,lab,col){
     c.font='11px Segoe UI';c.fillStyle='#64748b';
     let displayLab = String(lab[i]).trim();
     if(displayLab.length > 5 && displayLab.includes('-')) displayLab = displayLab.slice(5);
-    if(i%step==0)c.fillText(displayLab,cx,h-p.b+16);
+    if(i%step===0 || (n<=12)){
+      c.strokeStyle='#94a3b8';c.beginPath();c.moveTo(cx,h-p.b);c.lineTo(cx,h-p.b+4);c.stroke();
+      c.fillText(displayLab,cx,h-p.b+16);
+    }
   });
   c.textAlign='left';
 }
@@ -146,33 +156,97 @@ function draw(id,series){
     let y=p.t+j*(h-p.t-p.b)/5,v=mx-j*(mx-mn)/5;
     c.beginPath();c.moveTo(p.l,y);c.lineTo(w-p.r,y);c.stroke();c.fillText(v.toFixed(2),6,y+4);
   }
-  // hour grid (12:00)
+  c.strokeStyle='#cbd5e1';c.beginPath();c.moveTo(p.l,h-p.b);c.lineTo(w-p.r,h-p.b);c.stroke();
+  // 切りのいい区切りでX軸グリッド＆数字ラベルを描画
   if(window.__chartRows&&window.__chartRows.length===maxLen){
-    let R=window.__chartRows;c.save();c.strokeStyle='#cbd5e1';c.lineWidth=1;c.setLineDash([2,4]);
-    R.forEach((x,i)=>{
-      let t=String(x.target_datetime||'');
-      if(/(\s|T)(12):00/.test(t)){
-        let xx=X(i);c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
-        c.fillText('12:00',xx-12,h-p.b+14);
+    let R=window.__chartRows;c.save();c.textAlign='center';c.font='11px Segoe UI';
+    let plotW=w-p.l-p.r;
+    if(isAllAreasMode && days===1){
+      // 1日全エリア表示: 各エリア幅に応じて 6/12/18 または 12:00 を表示
+      let areaW=plotW/10;
+      let targetHours=areaW>=105?[6,12,18]:[12];
+      R.forEach((x,i)=>{
+        let t=String(x.target_datetime||'');
+        let m=t.match(/(?:\s|T)(\d{2}):00/);
+        if(m){
+          let hh=parseInt(m[1],10);
+          if(targetHours.includes(hh)){
+            let xx=X(i);
+            c.strokeStyle='#cbd5e1';c.lineWidth=1;c.setLineDash([2,4]);
+            c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
+            c.setLineDash([]);c.strokeStyle='#94a3b8';
+            c.beginPath();c.moveTo(xx,h-p.b);c.lineTo(xx,h-p.b+4);c.stroke();
+            c.fillStyle='#64748b';
+            c.fillText(areaW>=105?`${hh}`:`${String(hh).padStart(2,'0')}:00`,xx,h-p.b+16);
+          }
+        }
+      });
+    } else if(days===1){
+      // 1日個別エリア表示: 3時間おき (幅が狭い場合は6時間おき)
+      let stepH=plotW>=480?3:6;
+      R.forEach((x,i)=>{
+        let t=String(x.target_datetime||'');
+        let m=t.match(/(?:\s|T)(\d{2}):00/);
+        if(m){
+          let hh=parseInt(m[1],10);
+          if(hh%stepH===0){
+            let xx=X(i);
+            c.strokeStyle=hh===0?'#94a3b8':'#cbd5e1';c.lineWidth=1;c.setLineDash(hh===0?[]:[2,4]);
+            c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
+            c.setLineDash([]);c.strokeStyle='#94a3b8';
+            c.beginPath();c.moveTo(xx,h-p.b);c.lineTo(xx,h-p.b+4);c.stroke();
+            c.fillStyle='#475569';
+            c.fillText(`${String(hh).padStart(2,'0')}:00`,xx,h-p.b+16);
+          }
+        }
+      });
+    } else {
+      // 複数日表示: 日数と幅に応じた切のいい日区切り + 余裕があれば12:00補助目盛
+      let dayIndices=[];
+      R.forEach((x,i)=>{
+        let t=String(x.target_datetime||'');
+        let mid=/[ T]00:00/.test(t)||(!x.target_datetime&&x.slot==1);
+        if(mid) dayIndices.push({i, label:String(x.target_date||t.slice(0,10)).slice(5)});
+      });
+      let nDays=Math.max(1,dayIndices.length);
+      let dayW=plotW/nDays;
+      let maxDateLabels=Math.max(2,Math.floor(plotW/52));
+      let rawStep=nDays/maxDateLabels;
+      let dayStep=nDays<=maxDateLabels?1:([1,2,3,5,7,10,14,15,30].find(s=>s>=rawStep)||Math.ceil(rawStep));
+      dayIndices.forEach((dObj,idx)=>{
+        let xx=X(dObj.i);
+        c.strokeStyle='#64748b';c.lineWidth=1;c.setLineDash([]);
+        c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
+        if(idx%dayStep===0){
+          c.strokeStyle='#475569';
+          c.beginPath();c.moveTo(xx,h-p.b);c.lineTo(xx,h-p.b+5);c.stroke();
+          c.fillStyle='#334155';
+          c.fillText(dObj.label,Math.min(Math.max(xx,p.l+18),w-p.r-18),h-p.b+17);
+        }
+      });
+      if(dayW>=90){
+        let subHours=dayW>=190?[6,12,18]:[12];
+        R.forEach((x,i)=>{
+          let t=String(x.target_datetime||'');
+          let m=t.match(/(?:\s|T)(\d{2}):00/);
+          if(m){
+            let hh=parseInt(m[1],10);
+            if(subHours.includes(hh)){
+              let xx=X(i);
+              c.strokeStyle='#e2e8f0';c.lineWidth=1;c.setLineDash([2,4]);
+              c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
+              c.setLineDash([]);c.fillStyle='#94a3b8';c.font='10px Segoe UI';
+              c.fillText(`${String(hh).padStart(2,'0')}:00`,xx,h-p.b+30);
+              c.font='11px Segoe UI';
+            }
+          }
+        });
       }
-    });
+    }
     c.setLineDash([]);c.restore();
   }
   // zero line
   if(mn<0&&mx>0){c.strokeStyle='#94a3b8';c.setLineDash([5,4]);c.beginPath();c.moveTo(p.l,Y(0));c.lineTo(w-p.r,Y(0));c.stroke();c.setLineDash([]);}
-  // midnight lines (for multi-day mode)
-  if(!isAllAreasMode && window.__chartRows && window.__chartRows.length === maxLen){
-    let R=window.__chartRows;c.save();c.strokeStyle='#475569';c.fillStyle='#334155';c.lineWidth=1.2;c.setLineDash([]);c.font='11px Segoe UI';
-    R.forEach((x,i)=>{
-      let t=String(x.target_datetime||'');
-      let mid=/[ T]00:00/.test(t)||(!x.target_datetime&&x.slot==1);
-      if(mid){
-        let xx=X(i);c.beginPath();c.moveTo(xx,p.t);c.lineTo(xx,h-p.b);c.stroke();
-        c.fillText(String(x.target_date||t.slice(0,10)).slice(5),xx+3,p.t+11);
-      }
-    });
-    c.restore();
-  }
   // draw lines: 予測と実績の線の太さを同じ (2px) に統一
   series.forEach(s=>{
     c.strokeStyle=s.c;
