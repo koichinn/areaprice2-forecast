@@ -135,6 +135,12 @@ def main():
 
     print(f"OK occto_da8: {len(out):,}行 {new.index.min()}〜{nm}  (前回 {0 if old is None else len(old):,}行 〜{om})")
 
+    try:
+        import occto_area_ic_updater as _aic
+        _aic.update_occto_area_ic(a.base)
+    except Exception as _e:
+        print(f"WARN occto_area_ic_da 更新失敗(続行): {_e}")
+
     return 0
 
 if __name__ == "__main__": sys.exit(main())
