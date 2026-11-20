@@ -107,6 +107,21 @@ def prep(area, v8dir=None):
     P, pcol, _, _ = E.load(v8dir / f"jepx_training_v8_{area}_premium_day1.parquet", "premium", f"{area}_premium")
     ca = [c for c in E.features(A) if not re.search(NOACT, c)]
     cp = [c for c in E.features(P) if not re.search(NOACT, c)]
+    try:
+        import occto_area_ic_updater as OCU
+        occ = OCU.load_occto_merged(include_live_downloads=False)
+        if not occ.empty:
+            occ_cols = OCU.select_area_occto_cols(list(occ.columns), area)
+            add_a = [c for c in occ_cols if c not in ca]
+            add_p = [c for c in occ_cols if c not in cp]
+            if add_a:
+                A = A.drop(columns=[c for c in add_a if c in A.columns], errors="ignore").join(occ[add_a], how="left")
+                ca = ca + add_a
+            if add_p:
+                P = P.drop(columns=[c for c in add_p if c in P.columns], errors="ignore").join(occ[add_p], how="left")
+                cp = cp + add_p
+    except Exception as e_occ:
+        print(f"WARN {area} OCCTO/IC結合スキップ: {e_occ}")
     return A, acol, ca, P, pcol, cp
 
 
@@ -166,6 +181,16 @@ def predict(a):
     rows, warn = [], []
     now = datetime.now().astimezone().isoformat()
 
+    occ_live = pd.DataFrame()
+    try:
+        import occto_area_ic_updater as OCU
+        occ_live = OCU.load_occto_merged(include_live_downloads=True)
+        if not occ_live.empty:
+            cov = int(occ_live.index.isin(idx).sum())
+            print(f">> OCCTO/IC特徴量を読み込みました ({len(occ_live.columns)}列, DAY1カバレッジ={cov}/48コマ)")
+    except Exception as e_ol:
+        print(f"WARN OCCTO/ICライブ読込スキップ: {e_ol}")
+
     models_8 = None
     if AREA_MODEL_PATH.is_file():
         try:
@@ -198,12 +223,22 @@ def predict(a):
 
             xa = fa[fa["area"] == ar].set_index("target_datetime").reindex(idx)
             xp = fp[fp["area"] == ar].set_index("target_datetime").reindex(idx)
+            if not occ_live.empty:
+                occ_day = occ_live.reindex(idx)
+                xa = xa.drop(columns=[c for c in occ_day.columns if c in xa.columns], errors="ignore").join(occ_day, how="left")
+                xp = xp.drop(columns=[c for c in occ_day.columns if c in xp.columns], errors="ignore").join(occ_day, how="left")
 
             if models_8 is not None and ar in models_8:
                 m = models_8[ar]
                 acol = m["acol"]
                 ca = m["ca"]
                 cp = m["cp"]
+                for col_need in ca:
+                    if col_need not in xa.columns:
+                        xa[col_need] = np.nan
+                for col_need in cp:
+                    if col_need not in xp.columns:
+                        xp[col_need] = np.nan
                 lag = pd.to_numeric(xa[acol], errors="coerce").to_numpy(float)
                 if np.isnan(lag).any():
                     raise RuntimeError(f"{acol} が欠損です(前日の{ar}の価格がJEPXマスターにありません)")
