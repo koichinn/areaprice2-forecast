@@ -111,6 +111,8 @@ def export_8area_models():
             "ca": ca,
             "cp": cp,
             "acol": acol,
+            "anchor_type": "anc_cal" if ar in PAR.CAL_ANCHOR_AREAS else "lag1d",
+            "blend_w": PAR.AREA_BLEND_W.get(ar, 0.5),
             "trained_at": day.strftime("%Y-%m-%d"),
             "n_direct": F.n_a,
             "n_premium": F.n_p,
