@@ -32,7 +32,56 @@ JEPX_MASTER = Path(r"P:\エリアプライス2\database\JPEXデータ\data\jepx_
 PRED_HIST_CSV = OUT / "forecast_area_day1_recon_history.csv"
 
 AREAS = ["hokkaido", "tohoku", "tokyo", "chubu", "hokuriku", "kansai", "chugoku", "shikoku", "kyushu"]
+AREA_BLEND_W = {"chubu": 0.35, "chugoku": 0.80, "shikoku": 0.75, "kyushu": 0.85}
+CAL_ANCHOR_AREAS = {"kansai", "chugoku"}
 NOACT = r"^(?!システムプライス|area_price_yen_kwh|売り入札量|買い入札量|約定総量|pr_|premium_|dt_).*_lag\d+d$"
+
+
+def compute_area_anc_cal(df: pd.DataFrame, lag1_col: str) -> tuple[np.ndarray, np.ndarray]:
+    """カレンダー同期アンカー (anc_cal_area) と前日比差分を算出する。"""
+    import predict_system_day1_occto as PSO
+    t = pd.Series(pd.to_datetime(df.index), index=df.index)
+    cm = PSO.get_calendar_masks(t)
+    dow = cm["dow"]
+    is_hol, prev1_hol, prev7_hol = cm["is_hol"], cm["prev1_hol"], cm["prev7_hol"]
+    prev1_rest, prev2_rest, daytime = cm["prev1_rest"], cm["prev2_rest"], cm["daytime"]
+
+    l1 = pd.to_numeric(df[lag1_col], errors="coerce").to_numpy(float)
+    l2 = np.nan_to_num(pd.to_numeric(df.get("area_price_yen_kwh_lag2d", l1), errors="coerce").to_numpy(float), nan=l1)
+    l7 = np.nan_to_num(pd.to_numeric(df.get("area_price_yen_kwh_lag7d", l1), errors="coerce").to_numpy(float), nan=l1)
+    l14 = np.nan_to_num(pd.to_numeric(df.get("area_price_yen_kwh_lag14d", l7), errors="coerce").to_numpy(float), nan=l7)
+
+    w1 = np.ones(len(df), dtype=float)
+    w2 = np.zeros(len(df), dtype=float)
+    w7 = np.zeros(len(df), dtype=float)
+    w14 = np.zeros(len(df), dtype=float)
+
+    m_hol_mon = is_hol & (dow == 0)
+    w1[m_hol_mon], w7[m_hol_mon] = 0.55, 0.45
+
+    m_hol_wk = is_hol & (dow >= 1) & (~prev1_rest) & prev2_rest
+    w1[m_hol_wk], w2[m_hol_wk] = 0.25, 0.75
+
+    m_hol_mid = is_hol & (dow >= 1) & (~prev1_rest) & (~prev2_rest)
+    w1[m_hol_mid], w7[m_hol_mid] = 0.50, 0.50
+
+    m_mon_p7hol = (~is_hol) & (dow == 0) & prev7_hol & daytime
+    w1[m_mon_p7hol], w14[m_mon_p7hol] = 0.25, 0.75
+
+    m_mon_norm = (~is_hol) & (dow == 0) & (~prev7_hol) & daytime
+    w1[m_mon_norm], w7[m_mon_norm] = 0.25, 0.75
+
+    m_tue_ahol = (~is_hol) & (dow == 1) & prev1_hol & daytime
+    w1[m_tue_ahol], w7[m_tue_ahol] = 0.45, 0.55
+
+    m_wed_ahol = (~is_hol) & (dow >= 2) & (dow <= 4) & prev1_hol & daytime
+    w1[m_wed_ahol], w2[m_wed_ahol], w7[m_wed_ahol] = 0.40, 0.25, 0.35
+
+    m_sat = (~is_hol) & (dow == 5) & daytime
+    w1[m_sat], w7[m_sat], w14[m_sat] = 0.55, 0.25, 0.20
+
+    anc_cal = w1 * l1 + w2 * l2 + w7 * l7 + w14 * l14
+    return anc_cal, anc_cal - l1
 
 BLOCKS_PHYSICAL = [
     [0, 1, 2, 3, 4, 5, 6],       # 0: Night baseline
@@ -122,6 +171,13 @@ def prep(area, v8dir=None):
                 cp = cp + add_p
     except Exception as e_occ:
         print(f"WARN {area} OCCTO/IC結合スキップ: {e_occ}")
+    if area in CAL_ANCHOR_AREAS:
+        anc_cal, diff_l1 = compute_area_anc_cal(A, acol)
+        A["anc_cal_area"] = anc_cal
+        A["anc_cal_minus_l1"] = diff_l1
+        for col_c in ("anc_cal_area", "anc_cal_minus_l1"):
+            if col_c not in ca:
+                ca.append(col_c)
     return A, acol, ca, P, pcol, cp
 
 
@@ -129,7 +185,8 @@ def fit_area(A, acol, ca, P, cp, train_end, gap_days=2):
     t = A.index.to_series().reset_index(drop=True)
     lim = train_end - pd.Timedelta(days=gap_days)
     ya = A["target"].to_numpy(float)
-    alag = pd.to_numeric(A[acol], errors="coerce").to_numpy(float)
+    anchor_col = "anc_cal_area" if "anc_cal_area" in A.columns else acol
+    alag = pd.to_numeric(A[anchor_col], errors="coerce").to_numpy(float)
     yp = P.reindex(A.index)["target"].to_numpy(float)
     trb = (t < lim).to_numpy()
     tr_a = trb & ~np.isnan(alag) & ~np.isnan(ya)
@@ -233,13 +290,18 @@ def predict(a):
                 acol = m["acol"]
                 ca = m["ca"]
                 cp = m["cp"]
+                use_anc_cal = (m.get("anchor_type") == "anc_cal") or ("anc_cal_area" in ca)
+                if use_anc_cal:
+                    anc_vals, diff_l1 = compute_area_anc_cal(xa, acol)
+                    xa["anc_cal_area"] = anc_vals
+                    xa["anc_cal_minus_l1"] = diff_l1
                 for col_need in ca:
                     if col_need not in xa.columns:
                         xa[col_need] = np.nan
                 for col_need in cp:
                     if col_need not in xp.columns:
                         xp[col_need] = np.nan
-                lag = pd.to_numeric(xa[acol], errors="coerce").to_numpy(float)
+                lag = xa["anc_cal_area"].to_numpy(float) if use_anc_cal else pd.to_numeric(xa[acol], errors="coerce").to_numpy(float)
                 if np.isnan(lag).any():
                     raise RuntimeError(f"{acol} が欠損です(前日の{ar}の価格がJEPXマスターにありません)")
                 X_a = E.matrix(xa.reset_index(), ca)
@@ -265,27 +327,35 @@ def predict(a):
                     d = d_hgb
                     pr = pr_hgb
 
-                bl, rec = blend(d, pr, sp.to_numpy(float), a.blend_weight)
+                w_ar = float(m.get("blend_w", AREA_BLEND_W.get(ar, a.blend_weight)))
+                bl, rec = blend(d, pr, sp.to_numpy(float), w_ar)
 
-                # 3. 水準ドリフト補正 (EWMA)
+                # 3. 水準ドリフト補正 (EWMA) + JEPX最低価格クリップ
                 bl = apply_history_drift_correction(ar, bl, idx, k=0.45, span=3)
+                bl = np.clip(bl, 0.01, None)
 
                 n_a = m["n_direct"]
                 n_p = m["n_premium"]
             else:
                 A, acol, ca, P, pcol, cp = prep(ar)
                 F = fit_area(A, acol, ca, P, cp, day, a.gap_days)
+                if ar in CAL_ANCHOR_AREAS:
+                    anc_vals, diff_l1 = compute_area_anc_cal(xa, acol)
+                    xa["anc_cal_area"] = anc_vals
+                    xa["anc_cal_minus_l1"] = diff_l1
                 miss = [c for c in ca if c not in xa.columns] + [c for c in cp if c not in xp.columns]
                 if miss:
                     raise RuntimeError(f"将来の特徴量が足りません({len(miss)}列): {miss[:4]}")
-                lag = pd.to_numeric(xa[acol], errors="coerce").to_numpy(float)
+                lag = xa["anc_cal_area"].to_numpy(float) if ar in CAL_ANCHOR_AREAS else pd.to_numeric(xa[acol], errors="coerce").to_numpy(float)
                 if np.isnan(lag).any():
                     raise RuntimeError(f"{acol} が欠損です(前日の{ar}の価格がJEPXマスターにありません)")
                 X_a = E.matrix(xa.reset_index(), ca)
                 X_p = E.matrix(xp.reset_index(), cp)
                 d, pr = predict_rows(F, X_a, lag, X_p)
-                bl, rec = blend(d, pr, sp.to_numpy(float), a.blend_weight)
+                w_ar = float(AREA_BLEND_W.get(ar, a.blend_weight))
+                bl, rec = blend(d, pr, sp.to_numpy(float), w_ar)
                 bl = apply_history_drift_correction(ar, bl, idx, k=0.45, span=3)
+                bl = np.clip(bl, 0.01, None)
                 n_a = F.n_a
                 n_p = F.n_p
 
