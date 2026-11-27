@@ -132,7 +132,7 @@ def get_calendar_masks(dts: pd.Series) -> dict[str, np.ndarray]:
     rst_lag7 = np.array([is_rest_obon((pd.Timestamp(x) - pd.Timedelta(days=7)).date()) for x in dates], dtype=bool)
     rst_lag14 = np.array([is_rest_obon((pd.Timestamp(x) - pd.Timedelta(days=14)).date()) for x in dates], dtype=bool)
     rst_tomorrow = np.array([is_rest_obon((pd.Timestamp(x) + pd.Timedelta(days=1)).date()) for x in dates], dtype=bool)
-    daytime = (hour >= 7) & (hour <= 21)
+    daytime = (hour >= 6) & (hour <= 21)
 
     return {
         "dow": dow,
