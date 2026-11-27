@@ -235,7 +235,7 @@ def fetch(a):
 
     sess = FW.requests.Session(); sess.headers["User-Agent"] = "jepx-weather-future/1.0"; t0 = date.today(); fr = []
 
-    for ar in AREAS: print("取得中:", ar); fr.append(FW.fetch_area(sess, bf, ar, t0, t0 + timedelta(days=8), not a.no_ssl_verify))
+    for ar in AREAS: print("取得中:", ar); fr.append(FW.fetch_area(sess, bf, ar, t0 - timedelta(days=2), t0 + timedelta(days=8), not a.no_ssl_verify))
 
     wf = wf_frame(wfm, bf.to30(pd.concat(fr, ignore_index=True)), AREAS); d = prep(M.v6, INPUT); targets, actual = sets(M, d)
 
