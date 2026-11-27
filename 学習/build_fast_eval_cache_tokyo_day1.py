@@ -107,19 +107,139 @@ def load_and_engineer_tokyo(extra: pd.DataFrame | None = None) -> tuple[pd.DataF
     aic_cols = [c for c in aic.columns if c != "target_datetime" and c not in d.columns]
     d = d.merge(aic[["target_datetime"] + aic_cols], on="target_datetime", how="left")
     d["is_extra"] = False
+
+    # Load JEPX Master up front for neighbor lags & live context backfill
+    jm = pd.read_csv(JEPX_MASTER, encoding="utf-8-sig", low_memory=False)
+    jm["dt"] = pd.to_datetime(jm["受渡日"]) + pd.to_timedelta((pd.to_numeric(jm["時刻コード"]) - 1) * 30, unit="m")
+    jm = jm.drop_duplicates("dt", keep="last").set_index("dt").sort_index()
+
     if extra is not None and len(extra):
         ex = extra.copy()
         ex["target_datetime"] = pd.to_datetime(ex["target_datetime"])
-        ex = ex[~ex["target_datetime"].isin(d["target_datetime"])]
-        ex["is_extra"] = True
-        d = pd.concat([d, ex[[c for c in ex.columns if c in d.columns]]], ignore_index=True, sort=False)
+        ex_min = ex["target_datetime"].min().normalize()
+        ex_max = ex["target_datetime"].max().normalize()
+
+        # Build missing 15-day context rows between d.max() and ex_min so deltas/28d-kernel/EWMA never suffer NaN gaps
+        existing_dt = set(d["target_datetime"])
+        ex = ex[~ex["target_datetime"].isin(existing_dt)].copy()
+        ctx_idx = pd.date_range(ex_min - pd.Timedelta(days=15), ex_min - pd.Timedelta(minutes=30), freq="30min")
+        ctx_missing = [ts for ts in ctx_idx if ts not in existing_dt and ts not in set(ex["target_datetime"])]
+        if ctx_missing:
+            ex_all = pd.concat([pd.DataFrame({"target_datetime": ctx_missing}), ex], ignore_index=True, sort=False)
+        else:
+            ex_all = ex.reset_index(drop=True)
+        ex_all["is_extra"] = pd.Series(True, index=ex_all.index, dtype=bool)
+        ex_dt = pd.to_datetime(ex_all["target_datetime"])
+
+        new_ex_cols = {}
+        # (a) Fill national & 9-area weather (wf_*) from system future weather & archive
+        wf_frames = []
+        if pr.W_ARCH.exists():
+            for fp in sorted(pr.W_ARCH.glob("future_wf_*.parquet"))[-15:]:
+                try:
+                    w = pd.read_parquet(fp)
+                    w["target_datetime"] = pd.to_datetime(w["target_datetime"])
+                    wf_frames.append(w)
+                except Exception:
+                    pass
+        if pr.FUT_W.exists():
+            try:
+                w = pd.read_parquet(pr.FUT_W)
+                w["target_datetime"] = pd.to_datetime(w["target_datetime"])
+                wf_frames.append(w)
+            except Exception:
+                pass
+        if wf_frames:
+            wf_map = pd.concat(wf_frames, ignore_index=True).drop_duplicates("target_datetime", keep="last").set_index("target_datetime")
+            for c in [col for col in d.columns if col.startswith("wf_") and col in wf_map.columns]:
+                vals = wf_map[c].reindex(ex_dt).to_numpy()
+                if c in ex_all.columns:
+                    ex_all[c] = pd.Series(ex_all[c]).combine_first(pd.Series(vals, index=ex_all.index))
+                else:
+                    new_ex_cols[c] = vals
+
+        # (b) Fill OCCTO national (OCC5) & area/IC (aic_cols) including live downloads
+        occ_frames = [da8]
+        n_days_span = int((ex_max - (ex_min - pd.Timedelta(days=15))).days) + 1
+        for k in range(n_days_span):
+            d_k = ex_min - pd.Timedelta(days=15) + pd.Timedelta(days=k)
+            o_k, _ = pr.occto_daily(d_k, pd.date_range(d_k, periods=48, freq="30min"))
+            if o_k is not None:
+                occ_frames.append(o_k.rename(columns={pr.ev.TCOL: "target_datetime"}))
+        occ5_map = pd.concat(occ_frames, ignore_index=True).drop_duplicates("target_datetime", keep="last").set_index("target_datetime")
+        for c in pr.OCC5:
+            if c in occ5_map.columns:
+                vals = occ5_map[c].reindex(ex_dt).to_numpy()
+                if c in ex_all.columns:
+                    ex_all[c] = pd.Series(ex_all[c]).combine_first(pd.Series(vals, index=ex_all.index))
+                else:
+                    new_ex_cols[c] = vals
+
+        try:
+            import occto_area_ic_updater as OCU
+            aic_live = OCU.load_occto_merged(include_live_downloads=True)
+        except Exception:
+            aic_live = aic.drop_duplicates("target_datetime", keep="last").set_index("target_datetime")
+        for c in aic_cols:
+            if c in aic_live.columns:
+                vals = aic_live[c].reindex(ex_dt).to_numpy()
+                if c in ex_all.columns:
+                    ex_all[c] = pd.Series(ex_all[c]).combine_first(pd.Series(vals, index=ex_all.index))
+                else:
+                    new_ex_cols[c] = vals
+
+        # (c) Fill confirmed JEPX prices (strictly < ex_min for target/y_sys/y_prem) & confirmed lags
+        s_tok = pd.to_numeric(jm["エリアプライス東京(円/kWh)"], errors="coerce")
+        s_sys = pd.to_numeric(jm["システムプライス(円/kWh)"], errors="coerce")
+        s_prem = s_tok - s_sys
+        s_sell = pd.to_numeric(jm["売り入札量(kWh)"], errors="coerce")
+        s_buy = pd.to_numeric(jm["買い入札量(kWh)"], errors="coerce")
+
+        past_ctx_m = (ex_dt < ex_min).to_numpy()
+        for tcol, s_src in [("target", s_tok), ("y_sys", s_sys), ("y_prem", s_prem)]:
+            vals = np.where(past_ctx_m, s_src.reindex(ex_dt).to_numpy(float), np.nan)
+            if tcol in ex_all.columns:
+                ex_all[tcol] = pd.Series(ex_all[tcol]).combine_first(pd.Series(vals, index=ex_all.index))
+            else:
+                new_ex_cols[tcol] = vals
+
+        for k_lag in (1, 2, 3, 7, 14):
+            sh_dt = ex_dt - pd.Timedelta(days=k_lag)
+            lag_specs = [
+                (f"area_price_yen_kwh_lag{k_lag}d", s_tok),
+                (f"システムプライス(円/kWh)_lag{k_lag}d", s_sys),
+                (f"premium_lag{k_lag}d", s_prem),
+                (f"売り入札量(kWh)_lag{k_lag}d", s_sell),
+                (f"買い入札量(kWh)_lag{k_lag}d", s_buy),
+            ]
+            for c_lag, s_src in lag_specs:
+                if c_lag in d.columns:
+                    vals = s_src.reindex(sh_dt).to_numpy(float)
+                    if c_lag in ex_all.columns:
+                        ex_all[c_lag] = pd.Series(ex_all[c_lag]).combine_first(pd.Series(vals, index=ex_all.index))
+                    else:
+                        new_ex_cols[c_lag] = vals
+
+        l1_ex = s_tok.reindex(ex_dt - pd.Timedelta(days=1)).to_numpy(float)
+        l7_ex = s_tok.reindex(ex_dt - pd.Timedelta(days=7)).to_numpy(float)
+        s_tok_rm = s_tok.rolling(48 * 14, min_periods=48 * 3).mean()
+        s_tok_rs = s_tok.rolling(48 * 14, min_periods=48 * 3).std().clip(lower=0.5)
+        z_ex = ((s_tok - s_tok_rm) / s_tok_rs).reindex(ex_dt - pd.Timedelta(days=1)).to_numpy(float)
+        for c_pr, v_pr in [("pr_price_lag1", l1_ex), ("pr_momentum_1_7", l1_ex - l7_ex), ("pr_lag1_zscore", z_ex)]:
+            if c_pr in d.columns:
+                if c_pr in ex_all.columns:
+                    ex_all[c_pr] = pd.Series(ex_all[c_pr]).combine_first(pd.Series(v_pr, index=ex_all.index))
+                else:
+                    new_ex_cols[c_pr] = v_pr
+
+        if new_ex_cols:
+            ex_all = pd.concat([ex_all.copy(), pd.DataFrame(new_ex_cols, index=ex_all.index)], axis=1)
+
+        d = pd.concat([d, ex_all[[c for c in ex_all.columns if c in d.columns]]], ignore_index=True, sort=False)
         d["is_extra"] = d["is_extra"].fillna(False).astype(bool)
         d = d.sort_values("target_datetime").reset_index(drop=True)
 
     # 4. Merge confirmed neighbor area price lags (D-1, D-2, D-7, D-14) from JEPX Master
-    jm = pd.read_csv(JEPX_MASTER, encoding="utf-8-sig", low_memory=False)
-    jm["dt"] = pd.to_datetime(jm["受渡日"]) + pd.to_timedelta((pd.to_numeric(jm["時刻コード"]) - 1) * 30, unit="m")
-    jm = jm.drop_duplicates("dt", keep="last").set_index("dt")
     t_ser = pd.to_datetime(d["target_datetime"])
     nb_cols = {}
     for jp, en in [("東北", "toh"), ("中部", "chu"), ("関西", "kan"), ("北海道", "hok"), ("九州", "kyu")]:
