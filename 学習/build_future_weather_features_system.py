@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 
 # -*- coding: utf-8 -*-
 
@@ -148,7 +148,7 @@ def main():
 
     ap.add_argument("--out", type=Path, default=DB / "future_weather_features_system_day1.parquet")
 
-    ap.add_argument("--days", type=int, default=8); ap.add_argument("--replay-days", type=int, default=10)
+    ap.add_argument("--days", type=int, default=8); ap.add_argument("--past-days", type=int, default=16); ap.add_argument("--replay-days", type=int, default=10)
 
     ap.add_argument("--train", type=Path, default=DB / "training_v8_price_regime" / "jepx_training_v8_price_regime_system_natwf_day1.parquet")
 
@@ -174,11 +174,11 @@ def main():
 
     for ar in AREAS:
 
-        print(f"取得中: {ar}"); fr.append(fetch_area(sess, bf, ar, t0, t0 + timedelta(days=a.days), not a.no_ssl_verify))
+        print(f"取得中: {ar}"); fr.append(fetch_area(sess, bf, ar, t0 - timedelta(days=a.past_days), t0 + timedelta(days=a.days), not a.no_ssl_verify))
 
     hist = bf.to30(pd.concat(fr, ignore_index=True)); feat = build_features(hist, wfm)
 
-    feat = feat[(feat.index >= pd.Timestamp(t0 + timedelta(days=1))) & (feat.index < pd.Timestamp(t0 + timedelta(days=a.days + 1)))]
+    feat = feat[(feat.index >= pd.Timestamp(t0 - timedelta(days=max(0, a.past_days - 1)))) & (feat.index < pd.Timestamp(t0 + timedelta(days=a.days + 1)))]
 
     nn = feat.isna().sum(); print(f"将来の行={len(feat)} ({feat.index.min()} ~ {feat.index.max()}) wf_列={feat.shape[1]} 欠損のある列={int((nn > 0).sum())}")
 
