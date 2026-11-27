@@ -8,7 +8,7 @@
 - 事前学習モデル (models/area_models_8area.joblib) 読み込みにより、10〜20秒の高速推論を実行
 """
 from __future__ import annotations
-import argparse, re, sys, time
+import argparse, os, re, sys, time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,46 +108,95 @@ def lgb_blocks_predict(block_models: dict, X: np.ndarray, hours: np.ndarray) -> 
     return p
 
 
-def apply_history_drift_correction(area: str, pred_prices: np.ndarray, target_dt: pd.Series, k=0.45, span=3) -> np.ndarray:
-    """過去の予測履歴と実績から、直近残差の EWMA を算出して補正"""
-    if not (PRED_HIST_CSV.exists() and JEPX_MASTER.exists()):
-        return pred_prices
+AREA_JP = {
+    "hokkaido": "北海道", "tohoku": "東北", "tokyo": "東京",
+    "chubu": "中部", "hokuriku": "北陸", "kansai": "関西",
+    "chugoku": "中国", "shikoku": "四国", "kyushu": "九州",
+}
+
+
+def load_area_pred_history() -> pd.DataFrame:
+    paths = [PRED_HIST_CSV]
+    ws = os.environ.get("GITHUB_WORKSPACE")
+    if ws:
+        paths.append(Path(ws) / "予測" / PRED_HIST_CSV.name)
+    frames = []
+    for p in paths:
+        if p.exists():
+            for enc in ("utf-8-sig", "cp932"):
+                try:
+                    df_h = pd.read_csv(p, encoding=enc, low_memory=False)
+                    df_h["target_datetime"] = pd.to_datetime(df_h["target_datetime"], errors="coerce")
+                    frames.append(df_h.dropna(subset=["target_datetime", "area"]))
+                    break
+                except Exception:
+                    pass
+    if not frames:
+        return pd.DataFrame()
+    h = pd.concat(frames, ignore_index=True)
+    if "forecast_created_at" in h.columns:
+        h = h.sort_values(["target_datetime", "forecast_created_at"])
+    return h.drop_duplicates(["target_datetime", "area"], keep="last").reset_index(drop=True)
+
+
+def apply_history_drift_correction(area: str, pred_prices: np.ndarray, target_dt: pd.DatetimeIndex, k=0.45, span=3) -> tuple[np.ndarray, float]:
+    """確定済み(D-1以前)の補正前予測残差(実績 - pred_raw)の日次中央値 EWMA を算出し補正する"""
+    if area not in AREA_JP or not JEPX_MASTER.exists():
+        return pred_prices, 0.0
 
     try:
-        hist = pd.read_csv(PRED_HIST_CSV, encoding="utf-8-sig")
-        hist = hist[hist["area"] == area].copy()
-        hist["target_datetime"] = pd.to_datetime(hist["target_datetime"])
+        hist = load_area_pred_history()
+        if hist.empty:
+            return pred_prices, 0.0
+        hist = hist[hist["area"].astype(str).str.lower() == area].copy()
+        if hist.empty:
+            return pred_prices, 0.0
 
-        jepx = pd.read_csv(JEPX_MASTER, encoding="cp932")
-        date_col = [c for c in jepx.columns if "受渡日" in str(c) or "date" in str(c).lower()][0]
-        price_col = [c for c in jepx.columns if area in str(c).lower() or ("エリア" in str(c) and "価格" in str(c)) or "システムプライス" in str(c)][0]
+        jepx = None
+        for enc in ("utf-8-sig", "cp932"):
+            try:
+                jepx = pd.read_csv(JEPX_MASTER, encoding=enc, low_memory=False)
+                break
+            except UnicodeDecodeError:
+                pass
+        if jepx is None:
+            return pred_prices, 0.0
 
-        # 日次平均残差を計算
-        # 予測履歴の最新数日分
+        price_col = f"エリアプライス{AREA_JP[area]}(円/kWh)"
+        if price_col not in jepx.columns:
+            return pred_prices, 0.0
+
+        jepx["dt"] = pd.to_datetime(jepx["受渡日"]) + pd.to_timedelta((pd.to_numeric(jepx["時刻コード"]) - 1) * 30, unit="m")
+        act_map = pd.to_numeric(jepx.drop_duplicates("dt", keep="last").set_index("dt")[price_col], errors="coerce")
+
+        day_norm = pd.Timestamp(target_dt.min()).normalize()
+        hist = hist[(hist["target_datetime"] < day_norm) & (hist["target_datetime"] >= day_norm - pd.Timedelta(days=14))].copy()
+        if hist.empty:
+            return pred_prices, 0.0
+
+        raw_s = pd.to_numeric(hist["pred_raw_before_drift"], errors="coerce") if "pred_raw_before_drift" in hist.columns else pd.Series(np.nan, index=hist.index)
+        fb_s = pd.to_numeric(hist["predicted_price_yen_kwh"], errors="coerce")
+        hist["pred_raw"] = raw_s.fillna(fb_s)
+        hist["actual"] = hist["target_datetime"].map(act_map)
+        hist = hist.dropna(subset=["pred_raw", "actual"])
+        if len(hist) < 48 * 2:
+            return pred_prices, 0.0
+
         hist["_date"] = hist["target_datetime"].dt.normalize()
-        recent_dates = sorted(hist["_date"].unique())[-10:]
+        cnt = hist.groupby("_date")["actual"].count()
+        valid_dates = cnt[cnt >= 24].index
+        hist = hist[hist["_date"].isin(valid_dates)]
+        if hist["_date"].nunique() < 2:
+            return pred_prices, 0.0
 
-        residuals = []
-        for d in recent_dates:
-            d_str = d.strftime("%Y/%m/%d")
-            d_jepx = jepx[jepx[date_col] == d_str]
-            if not d_jepx.empty and price_col in d_jepx.columns:
-                act = pd.to_numeric(d_jepx[price_col], errors="coerce").mean()
-                pred_m = hist[hist["_date"] == d]["predicted_price_yen_kwh"].mean()
-                if np.isfinite(act) and np.isfinite(pred_m):
-                    residuals.append(pred_m - act)
-
-        if residuals:
-            recent_res = residuals[-span:]
-            weights = np.exp(np.linspace(-1, 0, len(recent_res)))
-            weights /= weights.sum()
-            avg_res = float(sum(r * w for r, w in zip(recent_res, weights)))
-            # 補正適用 (上限 ±3円)
-            adj = np.clip(k * avg_res, -3.0, 3.0)
-            return pred_prices - adj
+        daily_med_err = (hist["actual"] - hist["pred_raw"]).groupby(hist["_date"]).median().sort_index()
+        ewma_bias = float(daily_med_err.ewm(span=span, min_periods=2).mean().iloc[-1])
+        if not np.isfinite(ewma_bias):
+            return pred_prices, 0.0
+        adj = float(np.clip(k * ewma_bias, -2.0, 2.0))
+        return pred_prices + adj, adj
     except Exception:
-        pass
-    return pred_prices
+        return pred_prices, 0.0
 
 
 def prep(area, v8dir=None):
@@ -328,10 +377,10 @@ def predict(a):
                     pr = pr_hgb
 
                 w_ar = float(m.get("blend_w", AREA_BLEND_W.get(ar, a.blend_weight)))
-                bl, rec = blend(d, pr, sp.to_numpy(float), w_ar)
+                bl_raw, rec = blend(d, pr, sp.to_numpy(float), w_ar)
 
                 # 3. 水準ドリフト補正 (EWMA) + JEPX最低価格クリップ
-                bl = apply_history_drift_correction(ar, bl, idx, k=0.45, span=3)
+                bl, drift_adj = apply_history_drift_correction(ar, bl_raw, idx, k=0.45, span=3)
                 bl = np.clip(bl, 0.01, None)
 
                 n_a = m["n_direct"]
@@ -353,8 +402,8 @@ def predict(a):
                 X_p = E.matrix(xp.reset_index(), cp)
                 d, pr = predict_rows(F, X_a, lag, X_p)
                 w_ar = float(AREA_BLEND_W.get(ar, a.blend_weight))
-                bl, rec = blend(d, pr, sp.to_numpy(float), w_ar)
-                bl = apply_history_drift_correction(ar, bl, idx, k=0.45, span=3)
+                bl_raw, rec = blend(d, pr, sp.to_numpy(float), w_ar)
+                bl, drift_adj = apply_history_drift_correction(ar, bl_raw, idx, k=0.45, span=3)
                 bl = np.clip(bl, 0.01, None)
                 n_a = F.n_a
                 n_p = F.n_p
@@ -372,12 +421,14 @@ def predict(a):
                 "premium_pred": pr,
                 "anchor_lag1d": lag,
                 "model_used": f"grand_ens_v4(direct+sys:{model})",
+                "pred_raw_before_drift": np.clip(bl_raw, 0.01, None),
+                "drift_adjust": drift_adj,
                 "forecast_created_at": now,
                 "train_rows_direct": n_a,
                 "train_rows_premium": n_p
             }))
 
-            print(f"OK {ar:8s}: [Grand Ens v4] 予測 平均={bl.mean():.2f} 最小={bl.min():.2f} 最大={bl.max():.2f}")
+            print(f"OK {ar:8s}: [Grand Ens v4] 予測 平均={bl.mean():.2f} (drift={drift_adj:+.2f}) 最小={bl.min():.2f} 最大={bl.max():.2f}")
 
         except Exception as e:
             warn.append(f"{ar}: {e}")
@@ -391,8 +442,13 @@ def predict(a):
     OUT.mkdir(parents=True, exist_ok=True)
     out.to_csv(OUT / "forecast_area_day1_recon_latest.csv", index=False, encoding="utf-8-sig")
 
-    h = OUT / "forecast_area_day1_recon_history.csv"
-    out.to_csv(h, mode="a", header=not h.exists(), index=False, encoding="utf-8-sig" if not h.exists() else "utf-8")
+    h_prev = load_area_pred_history()
+    out_h = out.copy()
+    out_h["target_datetime"] = pd.to_datetime(out_h["target_datetime"])
+    h_merged = pd.concat([h_prev, out_h], ignore_index=True, sort=False) if not h_prev.empty else out_h
+    h_merged = h_merged[h_merged["target_datetime"] >= day - pd.Timedelta(days=90)]
+    h_merged = h_merged.drop_duplicates(["target_datetime", "area"], keep="last").sort_values(["target_datetime", "area"])
+    h_merged.to_csv(PRED_HIST_CSV, index=False, encoding="utf-8-sig")
 
     print(f"\nDAY1={day.date()} {out['area'].nunique()}エリア 成功 / 失敗{len(warn)}  システム予測のモデル={model}")
     print("出力:", OUT / "forecast_area_day1_recon_latest.csv")
