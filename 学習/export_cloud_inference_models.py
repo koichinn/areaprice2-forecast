@@ -125,10 +125,52 @@ def export_8area_models():
     print(f"[完了] 8エリア Grand Ensemble v4 モデル保存: {out_path.stat().st_size / (1024*1024):.2f} MB ({time.time() - t0:.1f}s)")
 
 
-def export_tokyo_models():
+def _fit_hgb_blocks_dict(Xtr, htr, rtr, blocks, loss="absolute_error", quantile=None, iter_scale=0.35, leaf=31, lr=0.045, it=450, msl=35, seed=0):
+    fitted = {}
+    valid_tr = np.isfinite(rtr)
+    covered = set()
+    for hs in blocks:
+        m = np.isin(htr, hs) & valid_tr
+        if m.sum() > 400:
+            mdl = B.mk_model(loss=loss, quantile=quantile, iter_scale=iter_scale, seed=seed, leaf=leaf, lr=lr, it=it, msl=msl)
+            mdl.fit(Xtr[m], rtr[m])
+            fitted[tuple(hs)] = mdl
+            covered.update(hs)
+    if len(covered) < 24:
+        mdl = B.mk_model(loss=loss, quantile=quantile, iter_scale=iter_scale, seed=seed, leaf=leaf, lr=lr, it=it, msl=msl)
+        mdl.fit(Xtr[valid_tr], rtr[valid_tr])
+        fitted["all"] = mdl
+    return fitted
+
+
+def _fit_tokyo_lgb_dict(Xtr, htr, rtr, blocks, objective="mae", alpha=0.5, n_est=180, lr=0.045, leaf=31, seed=42):
+    fitted = {}
+    valid_tr = np.isfinite(rtr)
+    for hs in blocks:
+        m = np.isin(htr, hs) & valid_tr
+        if m.sum() > 400:
+            mdl = lgb.LGBMRegressor(
+                objective=objective,
+                alpha=alpha,
+                n_estimators=n_est,
+                learning_rate=lr,
+                num_leaves=leaf,
+                min_child_samples=25,
+                subsample=0.85,
+                colsample_bytree=0.85,
+                n_jobs=-1,
+                random_state=seed,
+                verbose=-1,
+            )
+            mdl.fit(Xtr[m], rtr[m])
+            fitted[tuple(hs)] = mdl
+    return fitted
+
+
+def export_tokyo_models(iter_scale: float = 0.35):
     t0 = time.time()
     print("\n=== 東京DAY1 Grand Ensemble v4 モデルの事前学習＆保存開始 ===")
-    d, aux, _, _ = B.load_and_engineer_tokyo(extra=None)
+    d, aux, cand_cols, must_keep = B.load_and_engineer_tokyo(extra=None)
     t = pd.to_datetime(d["target_datetime"])
 
     l1_t_raw = pd.to_numeric(d["area_price_yen_kwh_lag1d"], errors="coerce").fillna(20.0).to_numpy(float)
@@ -153,37 +195,82 @@ def export_tokyo_models():
     new_drift_feats = [c for c in daily_summary.columns if "ewma" in c or "momentum" in c or "ratio" in c]
     d = d.merge(daily_summary[new_drift_feats], on="_date", how="left")
 
-    htr = t.dt.hour.to_numpy()
+    tr = d["target"].notna().to_numpy(bool)
+    htr = t.dt.hour.to_numpy()[tr]
     y_tok = d["target"].to_numpy(float)
     y_sys = d["y_sys"].to_numpy(float)
-    y_p = d["y_prem"].to_numpy(float)
-    y_z = 0.70 * y_sys + (y_tok - 0.70 * y_sys)
+    y_prem = d["y_prem"].to_numpy(float)
+    y_z07 = y_tok - 0.70 * y_sys
 
-    tok_f, prem_f, z07_f = B.feature_cols_v4(d)
-    tok_f += new_drift_feats
-    prem_f += new_drift_feats
-    z07_f += new_drift_feats
+    res_tok_cal = y_tok - aux["anc_cal_tok"]
+    res_tok_sim = y_tok - aux["anc_sim_tok"]
+    res_tok_lag1 = y_tok - d["area_price_yen_kwh_lag1d"].to_numpy(float)
+    res_prem_cal = y_prem - aux["anc_cal_prem"]
+    res_z07_cal = y_z07 - aux["anc_cal_z07"]
+    res_z07_sim = y_z07 - aux["anc_sim_z07"]
 
-    X_tok = B.matrix(d, tok_f)
-    X_prem = B.matrix(d, prem_f)
-    X_z07 = B.matrix(d, z07_f)
+    wq, wa, tok_feats_saved, prem_feats_saved, w_lgb_day, w_lgb_night = PTV4.load_calib()
+    if tok_feats_saved and all(c in d.columns for c in tok_feats_saved):
+        tok_feats = tok_feats_saved
+    else:
+        tok_feats = B.select_top_features(d, cand_cols, res_tok_cal, must_keep, top_k=195)
+    tok_feats = sorted(list(set(tok_feats) | set(new_drift_feats)))
 
-    # 5物理ブロック × 4モデル (tok_mae, tok_q65, prem_mae, prem_q65, z07_mae, z07_q65)
-    print("  東京物理ブロックモデル学習中...")
-    m_tok_mae = train_lgb_blocks(X_tok, htr, y_tok, objective="mae", seed=42)
-    m_tok_q65 = train_lgb_blocks(X_tok, htr, y_tok, objective="quantile", alpha=0.65, seed=42)
-    m_prem_mae = train_lgb_blocks(X_prem, htr, y_p, objective="mae", seed=42)
-    m_prem_q65 = train_lgb_blocks(X_prem, htr, y_p, objective="quantile", alpha=0.65, seed=42)
-    m_z07_mae = train_lgb_blocks(X_z07, htr, y_z - 0.70 * y_sys, objective="mae", seed=42)
-    m_z07_q65 = train_lgb_blocks(X_z07, htr, y_z - 0.70 * y_sys, objective="quantile", alpha=0.65, seed=42)
+    if prem_feats_saved and all(c in d.columns for c in prem_feats_saved):
+        prem_feats = prem_feats_saved
+    else:
+        prem_feats = B.select_top_features(d, cand_cols, res_prem_cal, must_keep, top_k=195)
+
+    X_tok = d.loc[tr, tok_feats].to_numpy(dtype=np.float32)
+    X_prem = d.loc[tr, prem_feats].to_numpy(dtype=np.float32)
+
+    DAY_SPLIT = [B.DAY, [h for h in range(24) if h not in B.DAY]]
+    WIDE_SPLIT = [B.WIDE, [h for h in range(24) if h not in B.WIDE]]
+
+    print(f"  東京 HGB (20系統) & LightGBM (4系統) 学習中 (n_train={int(tr.sum()):,}, tok_feats={len(tok_feats)}, prem_feats={len(prem_feats)})...")
+    hgb_models = {
+        "pred_tok_cal_day": _fit_hgb_blocks_dict(X_tok, htr, res_tok_cal[tr], DAY_SPLIT, iter_scale=iter_scale, seed=10),
+        "pred_tok_cal_wide": _fit_hgb_blocks_dict(X_tok, htr, res_tok_cal[tr], WIDE_SPLIT, iter_scale=iter_scale, seed=11),
+        "pred_tok_cal_wide_deep": _fit_hgb_blocks_dict(X_tok, htr, res_tok_cal[tr], WIDE_SPLIT, iter_scale=iter_scale, leaf=47, lr=0.035, it=520, msl=28, seed=12),
+        "pred_tok_cal_blk4": _fit_hgb_blocks_dict(X_tok, htr, res_tok_cal[tr], B.BLOCKS4, iter_scale=iter_scale, seed=13),
+        "pred_tok_cal_blk6": _fit_hgb_blocks_dict(X_tok, htr, res_tok_cal[tr], B.BLOCKS6, iter_scale=iter_scale, seed=14),
+        "pred_tok_cal_q65": _fit_hgb_blocks_dict(X_tok, htr, res_tok_cal[tr], WIDE_SPLIT, loss="quantile", quantile=0.65, iter_scale=iter_scale, seed=15),
+        "pred_tok_sim_wide": _fit_hgb_blocks_dict(X_tok, htr, res_tok_sim[tr], WIDE_SPLIT, iter_scale=iter_scale, seed=17),
+        "pred_tok_sim_blk6": _fit_hgb_blocks_dict(X_tok, htr, res_tok_sim[tr], B.BLOCKS6, iter_scale=iter_scale, seed=18),
+        "pred_tok_sim_q65": _fit_hgb_blocks_dict(X_tok, htr, res_tok_sim[tr], WIDE_SPLIT, loss="quantile", quantile=0.65, iter_scale=iter_scale, seed=19),
+        "pred_tok_lag1_wide": _fit_hgb_blocks_dict(X_tok, htr, res_tok_lag1[tr], WIDE_SPLIT, iter_scale=iter_scale, seed=20),
+        "pred_tok_lag1_blk6": _fit_hgb_blocks_dict(X_tok, htr, res_tok_lag1[tr], B.BLOCKS6, iter_scale=iter_scale, seed=21),
+        "pred_prem_cal_wide": _fit_hgb_blocks_dict(X_prem, htr, res_prem_cal[tr], WIDE_SPLIT, iter_scale=iter_scale, seed=30),
+        "pred_prem_cal_blk6": _fit_hgb_blocks_dict(X_prem, htr, res_prem_cal[tr], B.BLOCKS6, iter_scale=iter_scale, seed=31),
+        "pred_prem_cal_q65": _fit_hgb_blocks_dict(X_prem, htr, res_prem_cal[tr], WIDE_SPLIT, loss="quantile", quantile=0.65, iter_scale=iter_scale, seed=32),
+        "pred_z07_cal_wide": _fit_hgb_blocks_dict(X_prem, htr, res_z07_cal[tr], WIDE_SPLIT, iter_scale=iter_scale, seed=40),
+        "pred_z07_cal_blk6": _fit_hgb_blocks_dict(X_prem, htr, res_z07_cal[tr], B.BLOCKS6, iter_scale=iter_scale, seed=41),
+        "pred_z07_cal_q65": _fit_hgb_blocks_dict(X_prem, htr, res_z07_cal[tr], WIDE_SPLIT, loss="quantile", quantile=0.65, iter_scale=iter_scale, seed=42),
+        "pred_z07_sim_wide": _fit_hgb_blocks_dict(X_prem, htr, res_z07_sim[tr], WIDE_SPLIT, iter_scale=iter_scale, seed=43),
+        "pred_z07_sim_blk6": _fit_hgb_blocks_dict(X_prem, htr, res_z07_sim[tr], B.BLOCKS6, iter_scale=iter_scale, seed=44),
+        "pred_z07_sim_q65": _fit_hgb_blocks_dict(X_prem, htr, res_z07_sim[tr], WIDE_SPLIT, loss="quantile", quantile=0.65, iter_scale=iter_scale, seed=45),
+    }
+
+    lgb_models = {
+        "q60": _fit_tokyo_lgb_dict(X_tok, htr, res_tok_cal[tr], PTV4.BLOCKS_PHYSICAL, objective="quantile", alpha=0.60, seed=101),
+        "q65": _fit_tokyo_lgb_dict(X_tok, htr, res_tok_cal[tr], PTV4.BLOCKS_PHYSICAL, objective="quantile", alpha=0.65, seed=102),
+        "sim_q65": _fit_tokyo_lgb_dict(X_tok, htr, res_tok_sim[tr], PTV4.BLOCKS_PHYSICAL, objective="quantile", alpha=0.65, seed=103),
+        "l1": _fit_tokyo_lgb_dict(X_tok, htr, res_tok_cal[tr], PTV4.BLOCKS_PHYSICAL, objective="mae", alpha=0.50, seed=104),
+    }
 
     tokyo_models = {
-        "m_tok_mae": m_tok_mae, "m_tok_q65": m_tok_q65,
-        "m_prem_mae": m_prem_mae, "m_prem_q65": m_prem_q65,
-        "m_z07_mae": m_z07_mae, "m_z07_q65": m_z07_q65,
-        "tok_f": tok_f, "prem_f": prem_f, "z07_f": z07_f,
+        "hgb_models": hgb_models,
+        "lgb_models": lgb_models,
+        "tok_feats": tok_feats,
+        "prem_feats": prem_feats,
+        "wq": wq,
+        "wa": wa,
+        "w_lgb_day": w_lgb_day,
+        "w_lgb_night": w_lgb_night,
+        "iter_scale": iter_scale,
+        "n_train": int(tr.sum()),
         "trained_at": pd.Timestamp.today().strftime("%Y-%m-%d"),
-        "version": "v4_tokyo_super",
+        "version": "v4_tokyo_grand_ensemble_bit_exact",
     }
     out_tokyo = MODELS_DIR / "tokyo_day1_v4_models.joblib"
     joblib.dump(tokyo_models, out_tokyo, compress=3)
