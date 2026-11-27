@@ -65,6 +65,7 @@ ESSENTIAL_DATA_GLOBS = [
     # 予測出力の最新CSV
     "予測/*latest*.csv",
     "予測/tokyo_day1_v4_pred_history.csv",
+    "予測/forecast_area_day1_recon_history.csv",
     "予測/*compare*.csv",
 ]
 
