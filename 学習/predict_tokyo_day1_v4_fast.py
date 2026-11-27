@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tokyo Area Price DAY1 高速推論スクリプト v4 (事前学習済みモデル使用)
-- models/tokyo_day1_v4_models.joblib を読み込み、推論のみを0.5秒で実行
-- 特徴量211列、HGBスーパーアンサンブル + LightGBM物理ブロックの全数式を完全再現
-- 出力値はオンザフライ学習時とビット完全一致 (誤差 0.0000000000 円)
+- models/tokyo_day1_v4_models.joblib を読み込み、推論のみを高速実行
+- 特徴量209列、HGBスーパーアンサンブル + LightGBM物理ブロック + 連系線物理ディカップリング + 水準ドリフト補正を完全再現
+- 出力値は predict_tokyo_day1_v4.py オンザフライ学習時とビット完全一致
 """
 from __future__ import annotations
-import argparse, json, os, sys, time
+import argparse, sys, time
 from datetime import datetime
 from pathlib import Path
 import joblib
@@ -16,14 +16,12 @@ import pandas as pd
 sys.path.insert(0, r"P:\エリアプライス2\学習")
 import build_fast_eval_cache_tokyo_day1 as B
 import fast_tune_tokyo_day1 as ft
+import predict_tokyo_day1_v4 as PTV4
 
 ROOT = Path(r"P:\エリアプライス2")
 INTEG = ROOT / "database" / "統合データ"
 OUT_DIR = ROOT / "予測"
 MODEL_PATH = ROOT / "models" / "tokyo_day1_v4_models.joblib"
-PRED_HISTORY_CSV = OUT_DIR / "tokyo_day1_v4_pred_history.csv"
-DRIFT_K = 0.50
-DRIFT_MAX_ADJ = 1.00
 
 
 def predict_blocks_fast(fitted_dict: dict, Xte: np.ndarray, hte: np.ndarray) -> np.ndarray:
@@ -50,34 +48,7 @@ def predict_lgb_fast(fitted_dict: dict, Xte: np.ndarray, hte: np.ndarray) -> np.
     return p
 
 
-def compute_level_drift(today: pd.Timestamp) -> float:
-    if not PRED_HISTORY_CSV.exists():
-        return 0.0
-    try:
-        hist = pd.read_csv(PRED_HISTORY_CSV, encoding="utf-8-sig")
-        hist["target_datetime"] = pd.to_datetime(hist["target_datetime"])
-        j_master = ROOT / "database" / "JPEXデータ" / "data" / "jepx_spot_summary_master.csv"
-        if not j_master.exists():
-            return 0.0
-        jm = pd.read_csv(j_master, encoding="utf-8-sig", low_memory=False)
-        jm["dt"] = pd.to_datetime(jm["受渡日"]) + pd.to_timedelta((pd.to_numeric(jm["時刻コード"]) - 1) * 30, unit="m")
-        actual_col = [c for c in jm.columns if "エリアプライス東京" in c or "東京(円/kWh)" in c][0]
-        actuals = jm.drop_duplicates("dt", keep="last").set_index("dt")[actual_col]
-        hist["actual_price"] = hist["target_datetime"].map(actuals)
-        recent = hist[hist["target_datetime"] < today].dropna(subset=["actual_price", "pred_raw"]).copy()
-        if len(recent) < 48 * 3:
-            return 0.0
-        recent = recent.sort_values("target_datetime").iloc[-48 * 7:]
-        recent["error"] = recent["pred_raw"] - recent["actual_price"]
-        bias = float(recent["error"].mean())
-        if not np.isfinite(bias):
-            return 0.0
-        return float(np.clip(bias, -DRIFT_MAX_ADJ / DRIFT_K, DRIFT_MAX_ADJ / DRIFT_K))
-    except Exception:
-        return 0.0
-
-
-def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dict | None = None) -> pd.DataFrame:
+def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dict | None = None, save_latest: bool = True) -> pd.DataFrame:
     idx = pd.date_range(day, periods=48, freq="30min")
     assert len(p_sys) == 48, f"p_sys must have 48 slots, got {len(p_sys)}"
 
@@ -90,10 +61,11 @@ def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dic
     lgb_models = model_pkg["lgb_models"]
     tok_feats = model_pkg["tok_feats"]
     prem_feats = model_pkg["prem_feats"]
-    wq = model_pkg["wq"]
-    wa = model_pkg["wa"]
-    w_lgb_day = model_pkg["w_lgb_day"]
-    w_lgb_night = model_pkg["w_lgb_night"]
+    wq = float(model_pkg["wq"])
+    wa = float(model_pkg["wa"])
+    w_lgb_day = float(model_pkg["w_lgb_day"])
+    w_lgb_night = float(model_pkg["w_lgb_night"])
+    n_train = int(model_pkg.get("n_train", 45042))
 
     # 将来DAY1の特徴量（future_area_day1_area.parquet の東京の行）
     extra_df = None
@@ -110,13 +82,15 @@ def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dic
                 extra_df = sub
         except Exception as e:
             print(f"  future_area_day1_area.parquet 読込警告: {e}")
+    if extra_df is None:
+        extra_df = pd.DataFrame({"target_datetime": idx})
 
-    t_start = time.time()
     d, aux, _, _ = B.load_and_engineer_tokyo(extra=extra_df)
     t = pd.to_datetime(d["target_datetime"])
     te = (t >= idx[0]) & (t <= idx[-1])
     assert te.sum() == 48, f"テストコマ数が48ではありません: {te.sum()}"
     hte = t.dt.hour.to_numpy()[te]
+    y_tok = d["target"].to_numpy(float)
 
     # スプレッド＆水準ドリフト特徴量 (確定D-1以前の価格から生成)
     l1_t_raw = pd.to_numeric(d["area_price_yen_kwh_lag1d"], errors="coerce").fillna(20.0).to_numpy(float)
@@ -147,13 +121,16 @@ def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dic
     new_drift_feats = [c for c in daily_summary.columns if "ewma" in c or "momentum" in c or "ratio" in c]
     d = d.merge(daily_summary[new_drift_feats], on="_date", how="left")
 
+    na_tok = int((d.loc[te, tok_feats].isna().sum() > 0).sum())
+    na_prem = int((d.loc[te, prem_feats].isna().sum() > 0).sum())
+    print(f"  [Tokyo Fast] DAY1={day.strftime('%Y-%m-%d')} tok_feats={len(tok_feats)}(欠損列={na_tok}) prem_feats={len(prem_feats)}(欠損列={na_prem})")
+
     X_tok_te = d.loc[te, tok_feats].to_numpy(dtype=np.float32)
     X_prem_te = d.loc[te, prem_feats].to_numpy(dtype=np.float32)
 
     anc_cal_tok = aux["anc_cal_tok"][te]
     anc_sim_tok = aux["anc_sim_tok"][te]
     anc_cal_prem = aux["anc_cal_prem"][te]
-    anc_sim_prem = aux["anc_sim_prem"][te]
     anc_cal_z07 = aux["anc_cal_z07"][te]
     anc_sim_z07 = aux["anc_sim_z07"][te]
     l1_lag = d["area_price_yen_kwh_lag1d"].to_numpy(float)[te]
@@ -185,10 +162,38 @@ def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dic
     slot = np.arange(48)
     is_day = ((slot >= 14) & (slot <= 41)).astype(float)
     w_lgb = is_day * w_lgb_day + (1.0 - is_day) * w_lgb_night
-    pred_raw = (1.0 - w_lgb) * v4_hgb + w_lgb * lgb_direct
+    pred_final = (1.0 - w_lgb) * v4_hgb + w_lgb * lgb_direct
 
-    drift_bias = compute_level_drift(day)
-    pred_final = pred_raw - DRIFT_K * drift_bias
+    # 連系線物理ディカップリング (predict_tokyo_day1_v4.py と完全一致)
+    if "ic_fc_bwd_free" in d.columns:
+        fc_bwd_free = pd.to_numeric(d["ic_fc_bwd_free"], errors="coerce").to_numpy(float)[te]
+        fc_bwd_free = np.where(np.isnan(fc_bwd_free), 999.0, fc_bwd_free)
+    else:
+        fc_bwd_free = np.full(48, 999.0)
+
+    tok_cal = 0.20 * c["pred_tok_cal_day"] + 0.25 * c["pred_tok_cal_wide"] + 0.25 * c["pred_tok_cal_wide_deep"] + 0.15 * c["pred_tok_cal_blk4"] + 0.15 * c["pred_tok_cal_blk6"]
+    tok_sim = 0.55 * c["pred_tok_sim_wide"] + 0.45 * c["pred_tok_sim_blk6"]
+    tok_lag1 = 0.60 * c["pred_tok_lag1_wide"] + 0.40 * c["pred_tok_lag1_blk6"]
+    hgb_direct_l1 = (0.30 * tok_cal + 0.15 * tok_sim + 0.10 * tok_lag1) / 0.55
+    hgb_direct_q65 = 0.60 * c["pred_tok_cal_q65"] + 0.40 * c["pred_tok_sim_q65"]
+    hgb_direct = 0.70 * hgb_direct_q65 + 0.20 * hgb_direct_l1 + 0.10 * c["anc_cal"]
+    pure_direct = 0.50 * hgb_direct + 0.50 * lgb_direct
+
+    is_sat = (is_day == 1) & (fc_bwd_free <= 200.0)
+    pred_final = np.where(is_sat, 0.40 * v4_hgb + 0.60 * pure_direct, pred_final)
+
+    # 水準ドリフト補正 (predict_tokyo_day1_v4.py と完全一致 + 履歴更新)
+    pred_raw = pred_final.copy()
+    drift_bias = 0.0
+    try:
+        m_act = (t < idx[0]).to_numpy()
+        actual = pd.DataFrame({"target_datetime": t[m_act].to_numpy(), "y": y_tok[m_act]}).dropna()
+        drift_bias = PTV4.compute_drift_bias(actual, day)
+    except Exception as e:
+        print(f"  [Drift Warning] ドリフト補正をスキップ: {e}")
+    pred_final = np.clip(pred_raw + PTV4.DRIFT_K * drift_bias, 0.01, None)
+    print(f"  [Drift] 東京水準ドリフト補正: bias={drift_bias:+.3f} 円 x k={PTV4.DRIFT_K} -> {PTV4.DRIFT_K * drift_bias:+.3f} 円")
+    PTV4.update_pred_history(idx, pred_raw)
 
     res_df = pd.DataFrame({
         "target_datetime": idx,
@@ -203,10 +208,16 @@ def predict_tokyo_day1_fast(day: pd.Timestamp, p_sys: np.ndarray, model_pkg: dic
         "anchor_lag1d": l1_lag,
         "model_used": "v4_tokyo_grand_ensemble(fast_inference_bit_exact)",
         "pred_raw_before_drift": pred_raw,
-        "drift_adjust": -DRIFT_K * drift_bias,
+        "drift_adjust": PTV4.DRIFT_K * drift_bias,
         "forecast_created_at": datetime.now().astimezone().isoformat(),
-        "train_rows": 45042,
+        "train_rows": n_train,
     })
+
+    if save_latest:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        res_df.to_csv(OUT_DIR / f"forecast_tokyo_day1_v4_{day.strftime('%Y%m%d')}.csv", index=False, encoding="utf-8-sig")
+        res_df.to_csv(OUT_DIR / "forecast_tokyo_day1_v4_latest.csv", index=False, encoding="utf-8-sig")
+
     return res_df
 
 
@@ -227,13 +238,8 @@ def main():
     p_sys = sub[sys_c].to_numpy(float)
 
     t0 = time.time()
-    res = predict_tokyo_day1_fast(day, p_sys)
+    res = predict_tokyo_day1_fast(day, p_sys, save_latest=True)
     print(f"Tokyo DAY1 高速推論完了: {time.time() - t0:.2f} 秒 (平均: {res['predicted_price_yen_kwh'].mean():.2f} 円)")
-
-    out_csv = OUT_DIR / f"forecast_tokyo_day1_v4_{day.strftime('%Y%m%d')}.csv"
-    latest_csv = OUT_DIR / "forecast_tokyo_day1_v4_latest.csv"
-    res.to_csv(out_csv, index=False, encoding="utf-8-sig")
-    res.to_csv(latest_csv, index=False, encoding="utf-8-sig")
 
 
 if __name__ == "__main__":
