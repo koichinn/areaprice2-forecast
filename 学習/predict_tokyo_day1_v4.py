@@ -152,6 +152,8 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
                 print(f"  将来DAY1東京特徴量を future_area_day1_area.parquet から読み込みました ({len(extra_df)}行)")
         except Exception as e:
             print(f"  future_area_day1_area.parquet 読み込みスキップ: {e}")
+    if extra_df is None:
+        extra_df = pd.DataFrame({"target_datetime": idx})
 
     # 1. データと特徴量エンジニアリング
     print(f"=== 東京DAY1予測 (Grand Ensemble v4) 開始: {day.strftime('%Y-%m-%d')} ===")
@@ -161,7 +163,7 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     t = pd.to_datetime(d["target_datetime"])
     te = (t >= idx[0]) & (t <= idx[-1])
     assert te.sum() == 48, f"テストコマ数が48ではありません: {te.sum()}"
-    tr = t < idx[0]
+    tr = (t < idx[0]) & (~d["is_extra"].to_numpy(bool))
 
     # 1.1 スプレッド＆価格水準ドリフト特徴量エンジニアリング (確定D-1以前の価格から生成)
     l1_t_raw = pd.to_numeric(d["area_price_yen_kwh_lag1d"], errors="coerce").fillna(20.0).to_numpy(float)
@@ -329,11 +331,12 @@ def predict_tokyo_day1(day: pd.Timestamp, p_sys: np.ndarray, iter_scale: float =
     pred_raw = pred_final.copy()
     drift_bias = 0.0
     try:
-        actual = pd.DataFrame({"target_datetime": t[tr].to_numpy(), "y": y_tok[tr]}).dropna()
+        m_act = (t < idx[0]).to_numpy()
+        actual = pd.DataFrame({"target_datetime": t[m_act].to_numpy(), "y": y_tok[m_act]}).dropna()
         drift_bias = compute_drift_bias(actual, day)
     except Exception as e:
         print(f"  [Drift Warning] ドリフト補正をスキップ: {e}")
-    pred_final = pred_raw + DRIFT_K * drift_bias
+    pred_final = np.clip(pred_raw + DRIFT_K * drift_bias, 0.01, None)
     print(f"  [Drift] 水準ドリフト補正: bias={drift_bias:+.3f} 円 x k={DRIFT_K} -> {DRIFT_K * drift_bias:+.3f} 円")
     update_pred_history(idx, pred_raw)
 
